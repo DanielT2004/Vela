@@ -1,0 +1,13 @@
+# Secrets — never commit your real Gemini key
+Secrets.xcconfig
+
+# Xcode / build artifacts
+build/
+DerivedData/
+*.xcuserstate
+**/xcuserdata/
+.DS_Store
+
+# Swift Package Manager
+.swiftpm/
+.build/
