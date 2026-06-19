@@ -1,16 +1,20 @@
 import SwiftUI
 import UIKit
 
-private enum TriageAction { case keep, cut, hook }
+private enum TriageAction { case keep, cut, hook, broll }
+
+/// Ochre accent for the B-roll action (distinct from cut's terracotta and keep's sage).
+private let veBrollTone = Color(hex: 0x9A7350)
 
 /// The AI's single recommendation for a segment, surfaced on each Triage card so the creator can
 /// decide fast — while keeping the final say. Derived purely from fields Gemini already returns.
 private enum AIVerdict {
-    case cut, unsure, voiceover, strongKeep, keeper
+    case cut, unsure, broll, voiceover, strongKeep, keeper
 
     init(_ seg: Segment) {
         if !seg.keep { self = .cut }
         else if seg.isLowConfidence { self = .unsure }
+        else if seg.sceneType == .foodCloseup { self = .broll }
         else if seg.voiceoverCandidate { self = .voiceover }
         else if seg.hookScore >= 7.5 { self = .strongKeep }
         else { self = .keeper }
@@ -20,6 +24,7 @@ private enum AIVerdict {
         switch self {
         case .cut:        return "Suggested cut"
         case .unsure:     return "Your call"
+        case .broll:      return "Good for B-roll"
         case .voiceover:  return "Good for voiceover"
         case .strongKeep: return "Strong keep"
         case .keeper:     return "Keeper"
@@ -30,6 +35,7 @@ private enum AIVerdict {
         switch self {
         case .cut:        return "scissors"
         case .unsure:     return "questionmark.circle.fill"
+        case .broll:      return "square.on.square"
         case .voiceover:  return "mic.fill"
         case .strongKeep: return "star.fill"
         case .keeper:     return "checkmark"
@@ -39,16 +45,16 @@ private enum AIVerdict {
     var tone: Color {
         switch self {
         case .cut, .voiceover:     return .veTerracotta
-        case .unsure:              return Color(hex: 0x9A7350)   // ochre — matches the "review" badge
+        case .unsure, .broll:      return veBrollTone        // ochre
         case .strongKeep, .keeper: return .veSage
         }
     }
 
-    /// Resting lean for the front card: -1 = cut (left), +1 = keep (right), 0 = neutral.
+    /// Resting lean for the front card: -1 = cut (left), +1 = keep (right), 0 = neutral/down.
     var lean: CGFloat {
         switch self {
-        case .cut:                            return -1
-        case .unsure:                         return 0
+        case .cut:                             return -1
+        case .unsure, .broll:                  return 0
         case .voiceover, .strongKeep, .keeper: return 1
         }
     }
@@ -60,6 +66,8 @@ private enum AIVerdict {
             return seg.editNote.isEmpty ? "Lower-impact than your other clips." : seg.editNote
         case .unsure:
             return seg.editNote.isEmpty ? "We weren't sure on this one — you decide." : seg.editNote
+        case .broll:
+            return seg.editNote.isEmpty ? "A clean food shot — great as overlay B-roll. Swipe down." : seg.editNote
         case .voiceover:
             if let r = seg.voiceoverReason, !r.isEmpty { return r }
             return seg.editNote.isEmpty ? "Could play under a voiceover." : seg.editNote
@@ -205,32 +213,30 @@ struct TriageView: View {
 
     private var deck: some View {
         GeometryReader { geo in
-            // Every card gets the SAME explicit height, so the stacked cards behind the front one
-            // peek by a consistent few points instead of poking out unevenly (the M7.1 regression).
             let cardHeight = max(260, geo.size.height - 18)
             ZStack {
                 if isDone {
                     doneCard
-                } else {
-                    ForEach(visibleIndices.reversed(), id: \.self) { idx in
-                        let seg = queue[idx]
-                        let depth = idx - triageIndex
-                        TriageCardView(segment: seg,
-                                       thumbnail: thumbs[seg.id],
-                                       isHook: store?.hookId == seg.id,
-                                       isFront: depth == 0,
-                                       autoPlay: autoPlay,
-                                       playerActive: playerActive,
-                                       proxyURL: proxyURL,
-                                       dragOffset: depth == 0 ? dragOffset : .zero,
-                                       onTapPreview: { previewSegment = seg })
-                            .frame(width: geo.size.width, height: cardHeight)
-                            .scaleEffect(1 - CGFloat(depth) * 0.03)
-                            .offset(y: CGFloat(depth) * 12)
-                            .zIndex(Double(queue.count - idx))
-                            .allowsHitTesting(depth == 0)
-                            .gesture(dragGesture(seg))   // only the front card hit-tests (above)
-                    }
+                } else if let seg = currentSegment {
+                    // The cards "behind" are PLAIN decorative shapes — no video, thumbnail, or chip —
+                    // so a second video can never peek out, whatever the clip's size. The deck shows
+                    // exactly ONE real, content-bearing card at a time.
+                    backPlaceholder(height: cardHeight, inset: 26, yOffset: 18, opacity: 0.45)
+                    backPlaceholder(height: cardHeight, inset: 13, yOffset: 9, opacity: 0.75)
+
+                    TriageCardView(segment: seg,
+                                   height: cardHeight,
+                                   thumbnail: thumbs[seg.id],
+                                   isHook: store?.hookId == seg.id,
+                                   isFront: true,
+                                   autoPlay: autoPlay,
+                                   playerActive: playerActive,
+                                   proxyURL: proxyURL,
+                                   dragOffset: dragOffset,
+                                   onTapPreview: { previewSegment = seg })
+                        .frame(width: geo.size.width)
+                        .id(seg.id)   // fresh inline player per segment
+                        .gesture(dragGesture(seg))
                 }
                 if let flash { flashView(flash).zIndex(999) }
             }
@@ -240,16 +246,24 @@ struct TriageView: View {
         .padding(.top, 6)
     }
 
-    private var visibleIndices: [Int] {
-        Array(triageIndex ..< min(triageIndex + 3, queue.count))
+    /// A plain rounded-rectangle card "edge" peeking behind the front card (no content).
+    private func backPlaceholder(height: CGFloat, inset: CGFloat, yOffset: CGFloat, opacity: Double) -> some View {
+        RoundedRectangle(cornerRadius: 24, style: .continuous)
+            .fill(Color.white.opacity(opacity))
+            .padding(.horizontal, inset)
+            .frame(height: height)
+            .offset(y: yOffset)
+            .shadow(color: Color.veCharcoal.opacity(0.08), radius: 10, y: 6)
+            .allowsHitTesting(false)
     }
 
     private func flashView(_ action: TriageAction) -> some View {
         let (icon, color): (String, Color) = {
             switch action {
-            case .keep: return ("checkmark", Color.veSage)
-            case .cut:  return ("xmark", Color.veTerracotta)
-            case .hook: return ("star.fill", Color.veCharcoal)
+            case .keep:  return ("checkmark", Color.veSage)
+            case .cut:   return ("xmark", Color.veTerracotta)
+            case .hook:  return ("star.fill", Color.veCharcoal)
+            case .broll: return ("square.on.square", veBrollTone)
             }
         }()
         return Image(systemName: icon)
@@ -278,7 +292,7 @@ struct TriageView: View {
     // MARK: action buttons
 
     private var actionButtons: some View {
-        HStack(alignment: .top, spacing: 22) {
+        HStack(alignment: .top, spacing: 16) {
             circleButton(systemName: "xmark", label: "Cut", fg: Color.veTerracotta,
                          bg: .white, border: Color.veTerracotta.opacity(0.4), size: 56) {
                 if let s = currentSegment { performSwipe(.cut, s) }
@@ -286,6 +300,11 @@ struct TriageView: View {
             circleButton(systemName: "arrow.up", label: "Hook", fg: .white,
                          bg: Color.veCharcoal, border: .clear, size: 48) {
                 if let s = currentSegment { performSwipe(.hook, s) }
+            }
+            .padding(.top, 4)
+            circleButton(systemName: "square.on.square", label: "B-roll", fg: .white,
+                         bg: veBrollTone, border: .clear, size: 48) {
+                if let s = currentSegment { performSwipe(.broll, s) }
             }
             .padding(.top, 4)
             circleButton(systemName: "checkmark", label: "Keep", fg: .white,
@@ -434,6 +453,7 @@ struct TriageView: View {
             .onEnded { v in
                 let dx = v.translation.width, dy = v.translation.height
                 if dy < -110 && abs(dy) > abs(dx) { performSwipe(.hook, seg) }
+                else if dy > 110 && abs(dy) > abs(dx) { performSwipe(.broll, seg) }
                 else if dx > 95 { performSwipe(.keep, seg) }
                 else if dx < -95 { performSwipe(.cut, seg) }
                 else { withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { dragOffset = .zero } }
@@ -445,16 +465,18 @@ struct TriageView: View {
         withAnimation(.snappy(duration: 0.2)) { flash = action }
         withAnimation(.easeIn(duration: 0.26)) {
             switch action {
-            case .keep: dragOffset = CGSize(width: 700, height: 60)
-            case .cut:  dragOffset = CGSize(width: -700, height: 60)
-            case .hook: dragOffset = CGSize(width: 0, height: -900)
+            case .keep:  dragOffset = CGSize(width: 700, height: 60)
+            case .cut:   dragOffset = CGSize(width: -700, height: 60)
+            case .hook:  dragOffset = CGSize(width: 0, height: -900)
+            case .broll: dragOffset = CGSize(width: 0, height: 900)
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
             switch action {
-            case .keep: store?.keep(seg.id)
-            case .cut:  store?.cut(seg.id)
-            case .hook: store?.setHook(seg.id)
+            case .keep:  store?.keep(seg.id)
+            case .cut:   store?.cut(seg.id)
+            case .hook:  store?.setHook(seg.id)
+            case .broll: store?.markBroll(seg.id)
             }
             Log.app("Triage \(action) → segment \(seg.id) (\(seg.sceneType.label)). \(store?.vibeText ?? "")")
             triageIndex += 1
@@ -474,6 +496,8 @@ struct TriageView: View {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
         case .hook:
             UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+        case .broll:
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         }
     }
 
@@ -494,6 +518,7 @@ struct TriageView: View {
 
 private struct TriageCardView: View {
     let segment: Segment
+    let height: CGFloat
     let thumbnail: UIImage?
     let isHook: Bool
     let isFront: Bool
@@ -506,26 +531,47 @@ private struct TriageCardView: View {
     private var showsPlayer: Bool { isFront && autoPlay && proxyURL != nil }
     private var showsHints: Bool { isFront && dragOffset == .zero }
 
+    /// One-shot "swipe hint": when the card appears it slides toward its suggested side, then springs
+    /// back to rest — a quick preview of the recommended swipe. 0 at rest, →1 at full nudge.
+    @State private var hint: CGFloat = 0
+
     private var verdict: AIVerdict { AIVerdict(segment) }
-    /// 1 at rest, fading to 0 as the front card is dragged — so the lean never fights the gesture.
+    /// 1 at rest, fading to 0 as the front card is dragged — so the hint never fights the gesture.
     private var leanFactor: CGFloat {
         guard isFront else { return 0 }
         return max(0, 1 - hypot(dragOffset.width, dragOffset.height) / 120)
     }
-    private var leanX: CGFloat { verdict.lean * 10 * leanFactor }
-    private var leanDegrees: Double { Double(verdict.lean) * 2.5 * Double(leanFactor) }
+    /// The one-shot nudge offset/rotation, gated by `leanFactor` so grabbing the card cancels it.
+    /// At rest `hint == 0`, so the card always starts and ends perfectly vertical (no static tilt).
+    private var hintX: CGFloat { verdict.lean * 60 * hint * leanFactor }
+    private var hintDegrees: Double { Double(verdict.lean) * 5 * Double(hint) * Double(leanFactor) }
 
     var body: some View {
         VStack(spacing: 0) {
             hero
             footer
         }
-        .background(Color.white, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        // Lock to an EXACT height and clip to it *here* (inside the card), so no matter the video
+        // aspect or caption/reason length the content can never render outside the card and overlap
+        // a neighbour. This is the fix for the deck-overlap regression.
+        .frame(maxWidth: .infinity)
+        .frame(height: height)
+        .background(Color.white)
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .shadow(color: Color.veCharcoal.opacity(0.16), radius: 18, y: 14)
-        .offset(x: dragOffset.width + leanX, y: dragOffset.height)
-        .rotationEffect(.degrees(Double(dragOffset.width) * 0.04 + leanDegrees))
+        .offset(x: dragOffset.width + hintX, y: dragOffset.height)
+        .rotationEffect(.degrees(Double(dragOffset.width) * 0.04 + hintDegrees))
         .onTapGesture { onTapPreview() }
+        .onAppear(perform: playHint)
+    }
+
+    /// Plays the one-shot swipe-hint nudge (front card with a suggested direction only).
+    private func playHint() {
+        guard isFront, verdict.lean != 0 else { return }
+        withAnimation(.easeInOut(duration: 0.42).delay(0.35)) { hint = 1 }     // slide out
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.77) {
+            withAnimation(.spring(response: 0.55, dampingFraction: 0.6)) { hint = 0 }  // spring back
+        }
     }
 
     private var hero: some View {
@@ -569,6 +615,7 @@ private struct TriageCardView: View {
             badge("KEEP", color: Color.veSage, rotation: 8, opacity: keepOpacity, alignment: .topTrailing)
             badge("CUT", color: Color.veTerracotta, rotation: -8, opacity: cutOpacity, alignment: .topLeading)
             badge("★ HOOK", color: Color.veCharcoal, rotation: 0, opacity: hookOpacity, alignment: .top)
+            badge("↓ B-ROLL", color: veBrollTone, rotation: 0, opacity: brollOpacity, alignment: .bottom)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
@@ -579,6 +626,7 @@ private struct TriageCardView: View {
             hintPill("↑ HOOK").frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top).padding(.top, 12)
             hintPill("← CUT").frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading).padding(.leading, 10)
             hintPill("KEEP →").frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing).padding(.trailing, 10)
+            hintPill("↓ B-ROLL").frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom).padding(.bottom, 12)
         }
         .allowsHitTesting(false)
     }
@@ -638,4 +686,5 @@ private struct TriageCardView: View {
     private var keepOpacity: Double { (!isVertical && dragOffset.width > 0) ? min(1, dragOffset.width / 90) : 0 }
     private var cutOpacity: Double { (!isVertical && dragOffset.width < 0) ? min(1, -dragOffset.width / 90) : 0 }
     private var hookOpacity: Double { (isVertical && dragOffset.height < 0) ? min(1, -dragOffset.height / 110) : 0 }
+    private var brollOpacity: Double { (isVertical && dragOffset.height > 0) ? min(1, dragOffset.height / 110) : 0 }
 }

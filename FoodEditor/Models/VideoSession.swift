@@ -27,6 +27,11 @@ final class VideoSession {
     /// The parsed analysis result + editable state (M4) — the single source of truth for editing.
     var store: EditPlanStore?
 
+    /// On a RESUMED project, the persisted source map (proxy-timeline → original PHAsset). Lets export
+    /// re-resolve full-resolution originals from the camera roll. `nil` for a fresh session (whose
+    /// `merged.sourceSpans` still point at on-disk temp originals). See `ExportSourceResolver`.
+    var originSources: [PersistedSpan]?
+
     var count: Int { clips.count }
     var isEmpty: Bool { clips.isEmpty }
 
@@ -64,5 +69,13 @@ final class VideoSession {
         if let thumbnail { clips[idx].thumbnail = thumbnail }
     }
 
-    func reset() { clips.removeAll() }
+    func reset() { clips.removeAll(); originSources = nil }
+
+    /// Fully clear the session for a brand-new project (or before loading a saved one).
+    func startFresh() {
+        clips.removeAll()
+        merged = nil
+        store = nil
+        originSources = nil
+    }
 }

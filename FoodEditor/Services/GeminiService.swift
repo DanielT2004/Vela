@@ -157,6 +157,59 @@ final class GeminiService: VideoAnalyzing {
         throw GeminiError.timedOut("file never became ACTIVE")
     }
 
+    // MARK: - Structured-output schema
+
+    /// Mirrors the `EditPlan` / `Segment` data contract exactly, expressed in Gemini's OpenAPI-3.0
+    /// schema subset, so the model is **guaranteed** to return the same JSON shape every time — no
+    /// missing fields, no surprise `scene_type`. Property names are the snake_case JSON keys (the
+    /// `CodingKeys` raw values in EditPlan.swift), not the Swift property names.
+    ///
+    /// `trim_to_seconds` and `voiceover_reason` are `nullable` (yet still `required`) so the model
+    /// always emits the key but is free to leave it `null` — without `nullable` a required field
+    /// would force Gemini to fabricate a trim / voiceover reason on every segment.
+    private static let responseSchema: [String: Any] = {
+        let segmentSchema: [String: Any] = [
+            "type": "OBJECT",
+            "properties": [
+                "id":                  ["type": "INTEGER"],
+                "start_seconds":       ["type": "NUMBER"],
+                "end_seconds":         ["type": "NUMBER"],
+                "scene_type":          ["type": "STRING",
+                                        "enum": ["food-closeup", "talking-head", "bite-reaction",
+                                                 "plating", "ambiance", "wide-shot", "transition"]],
+                "description":         ["type": "STRING"],
+                "hook_score":          ["type": "NUMBER"],
+                "keep":                ["type": "BOOLEAN"],
+                "trim_to_seconds":     ["type": "NUMBER", "nullable": true],
+                "voiceover_candidate": ["type": "BOOLEAN"],
+                "voiceover_reason":    ["type": "STRING", "nullable": true],
+                "confidence":          ["type": "NUMBER"],
+                "edit_note":           ["type": "STRING"]
+            ] as [String: Any],
+            "propertyOrdering": ["id", "start_seconds", "end_seconds", "scene_type", "description",
+                                 "hook_score", "keep", "trim_to_seconds", "voiceover_candidate",
+                                 "voiceover_reason", "confidence", "edit_note"],
+            "required": ["id", "start_seconds", "end_seconds", "scene_type", "description",
+                         "hook_score", "keep", "trim_to_seconds", "voiceover_candidate",
+                         "voiceover_reason", "confidence", "edit_note"]
+        ]
+
+        return [
+            "type": "OBJECT",
+            "properties": [
+                "video_summary":        ["type": "STRING"],
+                "recommended_hook":     ["type": "STRING"],
+                "recommended_duration": ["type": "NUMBER"],
+                "final_edit_order":     ["type": "ARRAY", "items": ["type": "INTEGER"]],
+                "segments":             ["type": "ARRAY", "items": segmentSchema]
+            ] as [String: Any],
+            "propertyOrdering": ["video_summary", "recommended_hook", "recommended_duration",
+                                 "final_edit_order", "segments"],
+            "required": ["video_summary", "recommended_hook", "recommended_duration",
+                         "final_edit_order", "segments"]
+        ]
+    }()
+
     // MARK: - Step 3: generateContent
 
     private func generate(fileURI: String, mimeType: String, key: String) async throws -> String {
@@ -176,7 +229,9 @@ final class GeminiService: VideoAnalyzing {
                 ]
             ]],
             "generationConfig": [
-                "responseMimeType": "application/json"
+                "responseMimeType": "application/json",
+                "responseSchema": Self.responseSchema,
+                "temperature": 0
             ]
         ]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)

@@ -23,6 +23,10 @@ extension Color {
     static let veNote = Color(hex: 0xF4EFE6)
     /// #6E665C — reason-note text.
     static let veNoteText = Color(hex: 0x6E665C)
+    /// #EFE9DF — Polish timeline lane background.
+    static let veTrackLane = Color(hex: 0xEFE9DF)
+    /// #E6DFD2 — Polish preview letterbox mat.
+    static let vePreviewMat = Color(hex: 0xE6DFD2)
 
     /// Build a Color from a 0xRRGGBB hex literal.
     init(hex: UInt32, alpha: Double = 1) {

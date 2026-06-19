@@ -4,7 +4,7 @@ import Foundation
 
 /// The 7 exact `scene_type` values from the tested Gemini prompt (+ an `.unknown` fallback so a
 /// surprise value never crashes decoding).
-enum SceneType: String, Decodable, CaseIterable, Equatable {
+enum SceneType: String, Codable, CaseIterable, Equatable {
     case foodCloseup  = "food-closeup"
     case talkingHead  = "talking-head"
     case biteReaction = "bite-reaction"
@@ -17,6 +17,11 @@ enum SceneType: String, Decodable, CaseIterable, Equatable {
     init(from decoder: Decoder) throws {
         let raw = (try? decoder.singleValueContainer().decode(String.self)) ?? ""
         self = SceneType(rawValue: raw) ?? .unknown
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        try c.encode(rawValue)
     }
 
     /// Short label shown on cards/blocks.
@@ -50,7 +55,7 @@ enum SceneType: String, Decodable, CaseIterable, Equatable {
 // MARK: - Segment
 
 /// One analyzed segment of the raw video. Mirrors the tested prompt's schema exactly.
-struct Segment: Decodable, Identifiable, Equatable {
+struct Segment: Codable, Identifiable, Equatable {
     let id: Int
     let startSeconds: Double
     let endSeconds: Double
@@ -113,6 +118,22 @@ struct Segment: Decodable, Identifiable, Equatable {
         self.editNote = editNote
     }
 
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(startSeconds, forKey: .startSeconds)
+        try c.encode(endSeconds, forKey: .endSeconds)
+        try c.encode(sceneType, forKey: .sceneType)
+        try c.encode(description, forKey: .description)
+        try c.encode(hookScore, forKey: .hookScore)
+        try c.encode(keep, forKey: .keep)
+        try c.encode(trimToSeconds, forKey: .trimToSeconds)
+        try c.encode(voiceoverCandidate, forKey: .voiceoverCandidate)
+        try c.encode(voiceoverReason, forKey: .voiceoverReason)
+        try c.encode(confidence, forKey: .confidence)
+        try c.encode(editNote, forKey: .editNote)
+    }
+
     /// True when the AI was unsure enough that the doc says we should flag for review (~0.7).
     var isLowConfidence: Bool { confidence < 0.7 }
 }
@@ -121,7 +142,7 @@ struct Segment: Decodable, Identifiable, Equatable {
 
 /// The canonical object Gemini returns and the whole app is built around. Analysis produces it;
 /// the review UI edits a working copy of it (in `EditPlanStore`); assembly consumes it.
-struct EditPlan: Decodable, Equatable {
+struct EditPlan: Codable, Equatable {
     let videoSummary: String
     let recommendedHook: String
     let recommendedDuration: Double
@@ -152,6 +173,15 @@ struct EditPlan: Decodable, Equatable {
         self.recommendedDuration = recommendedDuration
         self.finalEditOrder = finalEditOrder
         self.segments = segments
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(videoSummary, forKey: .videoSummary)
+        try c.encode(recommendedHook, forKey: .recommendedHook)
+        try c.encode(recommendedDuration, forKey: .recommendedDuration)
+        try c.encode(finalEditOrder, forKey: .finalEditOrder)
+        try c.encode(segments, forKey: .segments)
     }
 
     /// A compact, human-readable summary for the console (M4 logging).

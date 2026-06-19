@@ -15,4 +15,9 @@ enum VeFont {
     static func sans(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
         Font.system(size: size, weight: weight, design: .default)
     }
+
+    /// JetBrains-Mono-style monospace (timecode, status labels, frame counts).
+    static func mono(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
+        Font.system(size: size, weight: weight, design: .monospaced)
+    }
 }

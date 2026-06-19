@@ -7,6 +7,7 @@ import SwiftUI
 struct ProcessingView: View {
     @Environment(AppRouter.self) private var router
     @Environment(VideoSession.self) private var session
+    @Environment(ProjectService.self) private var projects
 
     @State private var progress: Double = 0
     @State private var label = "Getting started"
@@ -214,11 +215,20 @@ struct ProcessingView: View {
                 rawResponse = raw
                 plan = parsed
                 progress = 1.0
+                // CP1.2 — register this analyzed session as a saved project.
+                projects.startNew(from: parsed)
+                projects.save(session: session, reaching: .triage)
             }
             NotificationService.shared.notify(
                 title: "Your cut is ready 🍴",
                 body: "\(parsed.segments.count) moments found · ~\(Int(parsed.recommendedDuration))s suggested. Tap to refine."
             )
+
+            // CP1.3 — capture a Home-tile poster from the proxy's opening frame, then re-save with it.
+            let posterTime = parsed.segments.first(where: { $0.id == parsed.finalEditOrder.first })?.startSeconds ?? 0.5
+            if let poster = await ThumbnailService.thumbnail(for: processed.url, at: posterTime) {
+                await MainActor.run { projects.save(session: session, poster: poster) }
+            }
         } catch {
             Log.gemini("Pipeline error: \(error.localizedDescription)")
             await MainActor.run { errorText = error.localizedDescription }
