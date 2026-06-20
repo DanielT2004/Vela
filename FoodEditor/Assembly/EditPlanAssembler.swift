@@ -162,7 +162,8 @@ enum EditPlanAssembler {
             for p in pieces {
                 let scaled = CMTime(seconds: p.range.duration.seconds * f, preferredTimescale: 600)
                 instructions.append(makeInstruction(track: vTrack, range: CMTimeRange(start: insStart, duration: scaled),
-                                                    natural: p.natural, preferred: p.preferred))
+                                                    natural: p.natural, preferred: p.preferred,
+                                                    cropScale: slot.cropScale, cropOffsetX: slot.cropOffsetX, cropOffsetY: slot.cropOffsetY))
                 insStart = CMTimeAdd(insStart, scaled)
             }
             cursor = insStart
@@ -180,6 +181,21 @@ enum EditPlanAssembler {
         videoComposition.renderSize = renderSize
         videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
         videoComposition.instructions = instructions
+
+        // ---- TEXT: burn captions in via a Core-Animation layer over the composited video ----
+        if !store.textOverlays.isEmpty {
+            let parent = CALayer(); parent.frame = CGRect(origin: .zero, size: renderSize)
+            let videoLayer = CALayer(); videoLayer.frame = parent.frame
+            parent.addSublayer(videoLayer)
+            var burned = 0
+            for o in store.textOverlays {
+                if let l = TextOverlayRenderer.layer(for: o, renderSize: renderSize) { parent.addSublayer(l); burned += 1 }
+            }
+            if burned > 0 {
+                videoComposition.animationTool = AVVideoCompositionCoreAnimationTool(postProcessingAsVideoLayer: videoLayer, in: parent)
+                Log.assembly("Burned \(burned) text overlay(s) into the export.")
+            }
+        }
 
         guard let export = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
             throw AssemblyError.exportInit
@@ -239,31 +255,16 @@ enum EditPlanAssembler {
         return pieces
     }
 
-    private static func makeInstruction(track: AVCompositionTrack, range: CMTimeRange,
-                                        natural: CGSize, preferred: CGAffineTransform) -> AVMutableVideoCompositionInstruction {
+    private static func makeInstruction(track: AVCompositionTrack, range: CMTimeRange, natural: CGSize,
+                                        preferred: CGAffineTransform,
+                                        cropScale: Double, cropOffsetX: Double, cropOffsetY: Double) -> AVMutableVideoCompositionInstruction {
         let inst = AVMutableVideoCompositionInstruction()
         inst.timeRange = range
         let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: track)
-        layer.setTransform(aspectFillTransform(natural: natural, preferred: preferred, into: renderSize), at: range.start)
+        layer.setTransform(ReframeTransform.fill(natural: natural, preferred: preferred, into: renderSize,
+                                                 cropScale: cropScale, cropOffsetX: cropOffsetX, cropOffsetY: cropOffsetY),
+                           at: range.start)
         inst.layerInstructions = [layer]
         return inst
-    }
-
-    /// Transform that aspect-FILLS a source (after its orientation transform) into `renderSize`,
-    /// center-cropped — the 9:16 TikTok reframe.
-    private static func aspectFillTransform(natural: CGSize, preferred: CGAffineTransform, into renderSize: CGSize) -> CGAffineTransform {
-        let displayRect = CGRect(origin: .zero, size: natural).applying(preferred)
-        let displaySize = CGSize(width: abs(displayRect.width), height: abs(displayRect.height))
-        let scale = max(renderSize.width / max(displaySize.width, 1), renderSize.height / max(displaySize.height, 1))
-        let scaledW = displaySize.width * scale
-        let scaledH = displaySize.height * scale
-        let tx = (renderSize.width - scaledW) / 2
-        let ty = (renderSize.height - scaledH) / 2
-
-        var t = preferred
-        t = t.concatenating(CGAffineTransform(translationX: -displayRect.minX, y: -displayRect.minY))
-        t = t.concatenating(CGAffineTransform(scaleX: scale, y: scale))
-        t = t.concatenating(CGAffineTransform(translationX: tx, y: ty))
-        return t
     }
 }

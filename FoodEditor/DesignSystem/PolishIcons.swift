@@ -53,7 +53,7 @@ struct TrackIcon: View {
 
 /// The Polish bottom-toolbar icons (Split / Trim / Speed / Volume / Delete).
 struct ToolIcon: View {
-    enum Kind { case split, trim, speed, volume, delete }
+    enum Kind { case split, trim, speed, text, volume, delete }
     let kind: Kind
     var color: Color
     var side: CGFloat = 22
@@ -63,6 +63,10 @@ struct ToolIcon: View {
             let k = size.width / 24
             func p(_ x: Double, _ y: Double) -> CGPoint { CGPoint(x: x * k, y: y * k) }
             switch kind {
+            case .text:                                   // a serifed "T" (top bar + stem + base)
+                strokeSeg(ctx, [(5, 7), (5, 5), (19, 5), (19, 7)], 1.8, k: k, color: color)
+                strokeSeg(ctx, [(12, 5), (12, 19)], 1.8, k: k, color: color)
+                strokeSeg(ctx, [(9, 19), (15, 19)], 1.8, k: k, color: color)
             case .split:                                  // scissors
                 strokeCircle(ctx, 6, 6, 2.4, 1.7, k: k, color: color)
                 strokeCircle(ctx, 6, 18, 2.4, 1.7, k: k, color: color)

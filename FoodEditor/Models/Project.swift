@@ -38,8 +38,9 @@ struct Project: Identifiable, Codable, Equatable {
     /// Bumped when the persisted `EditState` shape changes; lets us discard incompatible old saves.
     var schemaVersion: Int
 
-    /// Current persisted-state schema. v1 = segment-id model; v2 = clip-instance model (split-capable).
-    static let currentSchema = 2
+    /// Current persisted-state schema. v1 = segment-id model; v2 = clip-instance model (split-capable);
+    /// v3 = adds text overlays + per-clip crop (decoded leniently, so v2 files still open).
+    static let currentSchema = 3
 }
 
 // MARK: - Persisted source map
@@ -67,6 +68,33 @@ struct EditState: Codable, Equatable {
     var brollLane: [OverlayClip]
     var brollSource: [Int: Int]
     var dismissed: Set<Int>
+    /// v3: burned-in text captions. Defaults to `[]` so v2 saves (which lack the key) still decode.
+    var textOverlays: [TextOverlay] = []
+
+    enum CodingKeys: String, CodingKey {
+        case order, brollClips, cutTray, hookId, brollLane, brollSource, dismissed, textOverlays
+    }
+
+    init(order: [Clip], brollClips: [Int], cutTray: [Int], hookId: Int?, brollLane: [OverlayClip],
+         brollSource: [Int: Int], dismissed: Set<Int>, textOverlays: [TextOverlay] = []) {
+        self.order = order; self.brollClips = brollClips; self.cutTray = cutTray; self.hookId = hookId
+        self.brollLane = brollLane; self.brollSource = brollSource; self.dismissed = dismissed
+        self.textOverlays = textOverlays
+    }
+
+    /// Lenient decode: any field added after a save (currently `textOverlays`) defaults rather than
+    /// throwing, so older project.json files open unchanged.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        order        = try c.decode([Clip].self, forKey: .order)
+        brollClips   = try c.decode([Int].self, forKey: .brollClips)
+        cutTray      = try c.decode([Int].self, forKey: .cutTray)
+        hookId       = try c.decodeIfPresent(Int.self, forKey: .hookId)
+        brollLane    = try c.decode([OverlayClip].self, forKey: .brollLane)
+        brollSource  = try c.decode([Int: Int].self, forKey: .brollSource)
+        dismissed    = try c.decode(Set<Int>.self, forKey: .dismissed)
+        textOverlays = try c.decodeIfPresent([TextOverlay].self, forKey: .textOverlays) ?? []
+    }
 }
 
 // MARK: - v1 migration (pre clip-instance saves)

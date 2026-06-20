@@ -21,6 +21,9 @@ enum PolishComposition {
                                                 preferredTrackID: kCMPersistentTrackID_Invalid) else { return nil }
 
         // ── VIDEO ──
+        // Stitch the proxy slices into one track. The 9:16 reframe + per-clip crop are applied in the
+        // preview UI (PlayerLayerView gravity .resizeAspectFill + a CALayer transform) — NOT via an
+        // AVMutableVideoComposition here, which rendered black on device. Export still composites.
         var cursor = CMTime.zero
         for slot in slots {
             let dur = slot.duration

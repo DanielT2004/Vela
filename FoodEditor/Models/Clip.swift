@@ -16,15 +16,41 @@ struct Clip: Identifiable, Equatable, Codable {
     var outPoint: Double           // absolute proxy seconds; invariant: inPoint < outPoint
     var speed: Double              // 1 = normal; >1 faster, <1 slower
     var volume: Float              // 0…1
+    // v3 — per-clip 9:16 reframe. cropScale 1 = aspect-fill baseline; offsets are a fraction of the frame.
+    var cropScale: Double
+    var cropOffsetX: Double
+    var cropOffsetY: Double
 
     init(id: UUID = UUID(), sourceSegmentId: Int, inPoint: Double, outPoint: Double,
-         speed: Double = 1, volume: Float = 1) {
+         speed: Double = 1, volume: Float = 1,
+         cropScale: Double = 1, cropOffsetX: Double = 0, cropOffsetY: Double = 0) {
         self.id = id
         self.sourceSegmentId = sourceSegmentId
         self.inPoint = inPoint
         self.outPoint = outPoint
         self.speed = speed
         self.volume = volume
+        self.cropScale = cropScale
+        self.cropOffsetX = cropOffsetX
+        self.cropOffsetY = cropOffsetY
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, sourceSegmentId, inPoint, outPoint, speed, volume, cropScale, cropOffsetX, cropOffsetY
+    }
+
+    /// Lenient decode so v2 saves (without crop keys) still open — crop defaults to the aspect-fill baseline.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        sourceSegmentId = try c.decode(Int.self, forKey: .sourceSegmentId)
+        inPoint = try c.decode(Double.self, forKey: .inPoint)
+        outPoint = try c.decode(Double.self, forKey: .outPoint)
+        speed = try c.decodeIfPresent(Double.self, forKey: .speed) ?? 1
+        volume = try c.decodeIfPresent(Float.self, forKey: .volume) ?? 1
+        cropScale = try c.decodeIfPresent(Double.self, forKey: .cropScale) ?? 1
+        cropOffsetX = try c.decodeIfPresent(Double.self, forKey: .cropOffsetX) ?? 0
+        cropOffsetY = try c.decodeIfPresent(Double.self, forKey: .cropOffsetY) ?? 0
     }
 
     var clampedSpeed: Double { max(0.25, min(4, speed)) }

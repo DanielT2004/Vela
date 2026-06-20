@@ -12,6 +12,10 @@ struct RenderSlot: Equatable {
     let videoSourceStart: Double // proxy seconds where the video slice begins
     let videoSpeed: Double       // 1 = normal; >1 faster, <1 slower (base clips only; overlays = 1)
     let isOverlay: Bool          // true when a B-roll overlay covers this slot
+    // Per-clip 9:16 reframe (base clips only; overlays keep the default fill). 1 = aspect-fill baseline.
+    var cropScale: Double = 1
+    var cropOffsetX: Double = 0
+    var cropOffsetY: Double = 0
 }
 
 /// One clip's audio on a layer, used to build the audio tracks + `AVMutableAudioMix`. The base spine
@@ -55,6 +59,8 @@ final class EditPlanStore {
     var brollSource: [Int: Int]
     /// Reason-note ids the creator dismissed.
     var dismissed: Set<Int> = []
+    /// Layer "Text": burned-in captions over the assembled timeline (preview + export).
+    var textOverlays: [TextOverlay] = []
 
     init(plan: EditPlan) {
         self.plan = plan
@@ -104,19 +110,21 @@ final class EditPlanStore {
     /// `EditState`.
     convenience init(plan: EditPlan, restoring state: EditState) {
         self.init(plan: plan)
-        order       = state.order
-        brollClips  = state.brollClips
-        cutTray     = state.cutTray
-        hookId      = state.hookId
-        brollLane   = state.brollLane
-        brollSource = state.brollSource
-        dismissed   = state.dismissed
+        order        = state.order
+        brollClips   = state.brollClips
+        cutTray      = state.cutTray
+        hookId       = state.hookId
+        brollLane    = state.brollLane
+        brollSource  = state.brollSource
+        dismissed    = state.dismissed
+        textOverlays = state.textOverlays
     }
 
     /// A Codable snapshot of all editable state — the "edit" half of a saved project.
     func snapshot() -> EditState {
         EditState(order: order, brollClips: brollClips, cutTray: cutTray, hookId: hookId,
-                  brollLane: brollLane, brollSource: brollSource, dismissed: dismissed)
+                  brollLane: brollLane, brollSource: brollSource, dismissed: dismissed,
+                  textOverlays: textOverlays)
     }
 
     // MARK: - Undo / redo
@@ -149,6 +157,7 @@ final class EditPlanStore {
     private func apply(_ s: EditState) {
         order = s.order; brollClips = s.brollClips; cutTray = s.cutTray; hookId = s.hookId
         brollLane = s.brollLane; brollSource = s.brollSource; dismissed = s.dismissed
+        textOverlays = s.textOverlays
     }
 
     // MARK: - Lookups
@@ -336,6 +345,21 @@ final class EditPlanStore {
         brollLane[i].volume = max(0, min(1, value))
     }
 
+    // MARK: - Per-clip crop (9:16 reframe)
+
+    /// Set a Main clip's zoom + pan, clamping scale to 1…4 and the pan so the zoomed content can't pull
+    /// past the frame edges (max offset = (scale−1)/2 of the frame on each axis).
+    func setCrop(_ cid: UUID, scale: Double, offsetX: Double, offsetY: Double) {
+        guard let i = clipIndex(cid) else { return }
+        let s = max(1, min(scale, 4))
+        let m = Self.maxOffset(forScale: s)
+        order[i].cropScale = s
+        order[i].cropOffsetX = max(-m, min(offsetX, m))
+        order[i].cropOffsetY = max(-m, min(offsetY, m))
+    }
+    /// At scale `s` the content overhangs the frame by (s−1)/2 on each side — the max pannable offset.
+    static func maxOffset(forScale s: Double) -> Double { max(0, (s - 1) / 2) }
+
     // MARK: - Overlay-layer mutations
 
     /// Add a B-roll overlay from `sourceId`, starting at `start` seconds on the base timeline.
@@ -384,6 +408,43 @@ final class EditPlanStore {
         brollLane.removeAll { $0.sourceSegmentId == segmentId }
     }
 
+    // MARK: - Text-overlay mutations (Layer "Text")
+
+    /// Add a caption starting at `start` (assembled-timeline seconds), default ~2.5s long. Returns its id.
+    @discardableResult
+    func addTextOverlay(at start: Double) -> UUID {
+        let s = max(0, min(start, max(0, baseDuration - 0.5)))
+        let end = min(max(s + 0.5, baseDuration), s + 2.5)
+        let overlay = TextOverlay(startTime: s, endTime: max(s + 0.5, end))
+        textOverlays.append(overlay)
+        return overlay.id
+    }
+
+    /// Mutate one overlay in place (font / color / size / string / position …).
+    func updateTextOverlay(_ id: UUID, _ mutate: (inout TextOverlay) -> Void) {
+        guard let i = textOverlays.firstIndex(where: { $0.id == id }) else { return }
+        mutate(&textOverlays[i])
+    }
+
+    /// Set a caption's `[start, end]` (edge-trim), clamped to a 0.3s minimum and the base bounds.
+    func setTextBounds(_ id: UUID, start: Double, end: Double) {
+        guard let i = textOverlays.firstIndex(where: { $0.id == id }) else { return }
+        let s = max(0, min(start, max(0, baseDuration - 0.3)))
+        textOverlays[i].startTime = s
+        textOverlays[i].endTime = max(s + 0.3, min(end, baseDuration))
+    }
+
+    /// Move a caption to a new start, preserving its duration (clamped to the base bounds).
+    func moveTextOverlay(_ id: UUID, toStart start: Double) {
+        guard let i = textOverlays.firstIndex(where: { $0.id == id }) else { return }
+        let dur = textOverlays[i].duration
+        let s = max(0, min(start, max(0, baseDuration - dur)))
+        textOverlays[i].startTime = s
+        textOverlays[i].endTime = s + dur
+    }
+
+    func deleteTextOverlay(_ id: UUID) { textOverlays.removeAll { $0.id == id } }
+
     /// Auto-fill: lay one (distinct) B-roll clip over each talking / voiceover region of the spine —
     /// the "B-roll covers the talking" default, now visible and freely editable.
     private func seededLane() -> [OverlayClip] {
@@ -411,13 +472,15 @@ final class EditPlanStore {
     /// where one exists, otherwise the base clip's own video (carrying that clip's speed). Audio is
     /// built separately via `baseAudioPieces()` / `overlayAudioPieces()`.
     func renderSlots() -> [RenderSlot] {
-        struct Win { let segId: Int; let start: Double; let end: Double; let srcStart: Double; let speed: Double }
+        struct Win { let segId: Int; let start: Double; let end: Double; let srcStart: Double; let speed: Double
+                     let cropScale: Double; let cropOffsetX: Double; let cropOffsetY: Double }
         var base: [Win] = []
         var t = 0.0
         for c in order {
             let sp = c.clampedSpeed
             let tl = c.timelineDuration
-            base.append(Win(segId: c.sourceSegmentId, start: t, end: t + tl, srcStart: c.inPoint, speed: sp))
+            base.append(Win(segId: c.sourceSegmentId, start: t, end: t + tl, srcStart: c.inPoint, speed: sp,
+                            cropScale: c.cropScale, cropOffsetX: c.cropOffsetX, cropOffsetY: c.cropOffsetY))
             t += tl
         }
         let total = t
@@ -453,7 +516,8 @@ final class EditPlanStore {
                 slots.append(RenderSlot(baseStart: a, duration: b - a,
                                         videoSegId: bw.segId,
                                         videoSourceStart: bw.srcStart + (a - bw.start) * bw.speed,
-                                        videoSpeed: bw.speed, isOverlay: false))
+                                        videoSpeed: bw.speed, isOverlay: false,
+                                        cropScale: bw.cropScale, cropOffsetX: bw.cropOffsetX, cropOffsetY: bw.cropOffsetY))
             }
         }
         return slots

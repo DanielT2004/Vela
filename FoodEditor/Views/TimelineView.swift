@@ -686,9 +686,14 @@ private struct TimelineBlockView: View {
 struct PlayerLayerView: UIViewRepresentable {
     let player: AVPlayer
     var gravity: AVLayerVideoGravity = .resizeAspect
+    /// An extra affine transform on the player layer (used for per-clip crop zoom/pan). Applied to a
+    /// SUBLAYER, not via SwiftUI `.scaleEffect` (which rasterizes the live video to black) nor the
+    /// backing layer (which UIKit resets from `view.transform` on every layout pass).
+    var contentTransform: CGAffineTransform = .identity
 
     func makeUIView(context: Context) -> PlayerHostView {
         let v = PlayerHostView()
+        v.clipsToBounds = true
         v.playerLayer.player = player
         v.playerLayer.videoGravity = gravity
         return v
@@ -697,12 +702,37 @@ struct PlayerLayerView: UIViewRepresentable {
     func updateUIView(_ uiView: PlayerHostView, context: Context) {
         if uiView.playerLayer.player !== player { uiView.playerLayer.player = player }
         uiView.playerLayer.videoGravity = gravity
+        uiView.contentTransform = contentTransform
     }
 }
 
+/// Hosts an `AVPlayerLayer` as a **sublayer** (not the backing layer) so a per-clip crop transform on it
+/// survives UIKit's layout passes. The sublayer is sized to bounds each layout; `contentTransform` zooms
+/// /pans it about its center, clipped by the host's `clipsToBounds`.
 final class PlayerHostView: UIView {
-    override class var layerClass: AnyClass { AVPlayerLayer.self }
-    var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+    let playerLayer = AVPlayerLayer()
+    var contentTransform: CGAffineTransform = .identity { didSet { applyTransform() } }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        layer.addSublayer(playerLayer)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        playerLayer.bounds = CGRect(origin: .zero, size: bounds.size)
+        playerLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        playerLayer.setAffineTransform(contentTransform)
+        CATransaction.commit()
+    }
+
+    private func applyTransform() {
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        playerLayer.setAffineTransform(contentTransform)
+        CATransaction.commit()
+    }
 }
 
 // MARK: - Live preview compositor
