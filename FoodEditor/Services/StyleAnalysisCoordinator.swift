@@ -52,10 +52,11 @@ final class StyleAnalysisCoordinator {
         totalCount = clips.count
         label = "Getting started"
         template = nil
-        // Wrap in a background-task assertion so analysis keeps running (and notifies) if the creator
-        // backgrounds the app mid-call.
+        // The long analysis now runs server-side (one job per video), so only the on-device uploads need
+        // a background-task assertion — applied per-upload inside `run`. Once the uploads finish the
+        // creator can close the app and the work still completes.
         task = Task { [weak self] in
-            await BackgroundActivity.run("style-analysis") { await self?.run(clips: clips) }
+            await self?.run(clips: clips)
         }
     }
 
@@ -67,26 +68,46 @@ final class StyleAnalysisCoordinator {
         posterImage = clips.first?.thumbnail   // tile thumbnail for the saved template
 
         do {
-            var profiles: [StyleProfileRaw] = []
             let n = clips.count
+
+            // Phase A (0 → 50%) — compress + upload each video and start a server job for it. After this
+            // loop, ALL jobs are running on Supabase, so the creator can close the app.
+            var jobIds: [String] = []
             for (i, clip) in clips.enumerated() {
                 if Task.isCancelled { return }
-                let base = Double(i) / Double(n)
-                let span = 1.0 / Double(n)
-                label = n > 1 ? "Watching video \(i + 1) of \(n)" : "Watching your video"
+                let base = 0.5 * Double(i) / Double(n)
+                let span = 0.5 / Double(n)
+                label = n > 1 ? "Uploading video \(i + 1) of \(n)" : "Uploading your video"
 
-                // Compress this single video to a 720p proxy (first 30% of its slice).
+                // Compress this single video to a 720p proxy (first 60% of its upload slice).
                 let proxy = try await VideoPreprocessor.mergeAndCompress(clips: [clip]) { [weak self] p in
-                    Task { @MainActor in self?.progress = base + span * (p * 0.30) }
+                    Task { @MainActor in self?.progress = base + span * (p * 0.6) }
                 }
                 if Task.isCancelled { return }
 
-                // Extract the style profile (next 65% of its slice).
-                let raw = try await GeminiService.shared.rawStyleTemplateJSON(forVideoAt: proxy.url) { [weak self] stage, frac in
-                    Task { @MainActor in
-                        self?.progress = base + span * (0.30 + frac * 0.65)
-                        if n == 1 { self?.label = stage }
-                    }
+                // Upload phone→Google (background-task assertion covers a tap-away mid-upload), then hand
+                // the extraction to the server.
+                let uploaded = try await BackgroundActivity.run("style-upload") {
+                    try await GeminiService.shared.upload(at: proxy.url)
+                }
+                let jobId = try await GeminiService.shared.startStyleExtractionJob(
+                    fileURI: uploaded.fileURI, fileName: uploaded.fileName, mimeType: uploaded.mimeType,
+                    prompt: GeminiPrompt.styleProfile)
+                jobIds.append(jobId)
+                progress = base + span
+            }
+
+            // Phase B (50 → 95%) — poll each job to completion. The work runs server-side, so a
+            // suspend/resume just continues polling (no lost progress).
+            var profiles: [StyleProfileRaw] = []
+            for (i, jobId) in jobIds.enumerated() {
+                if Task.isCancelled { return }
+                let base = 0.5 + 0.45 * Double(i) / Double(n)
+                let span = 0.45 / Double(n)
+                label = n > 1 ? "Reading video \(i + 1) of \(n)" : "Reading your style"
+
+                let raw = try await GeminiService.shared.awaitJobResult(jobId: jobId) { [weak self] _ in
+                    Task { @MainActor in self?.progress = min(base + span * 0.9, 0.95) }
                 }
                 if Task.isCancelled { return }
 
@@ -96,6 +117,7 @@ final class StyleAnalysisCoordinator {
                 progress = base + span
             }
 
+            // Phase C (95 → 100%) — merge the per-video profiles into one template (unchanged).
             if Task.isCancelled { return }
             label = "Putting your style into words"
             progress = 0.98

@@ -343,12 +343,14 @@ struct PolishView: View {
                 .font(VeFont.mono(13))
             Spacer()
             HStack(spacing: 5) {
-                Image(systemName: "magnifyingglass").font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.veWarmGray)
-                Text(zoomLabel).font(VeFont.mono(11)).foregroundStyle(Color.veNoteText)
+                Image(systemName: "magnifyingglass").font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(zoomed ? Color.veTerracotta : Color.veWarmGray)
+                Text(zoomLabel).font(VeFont.mono(11, weight: zoomed ? .semibold : .regular))
+                    .foregroundStyle(zoomed ? Color.veTerracotta : Color.veNoteText)
             }
             .frame(height: 26).padding(.horizontal, 9)
-            .background(Color.white, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Color.veCharcoal.opacity(0.1), lineWidth: 1))
+            .background(zoomed ? Color.veTerracotta.opacity(0.14) : Color.white, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(zoomed ? Color.veTerracotta.opacity(0.3) : Color.veCharcoal.opacity(0.1), lineWidth: 1))
         }
         .padding(.horizontal, 16).padding(.top, 14)
     }
@@ -370,6 +372,9 @@ struct PolishView: View {
         let x = Double(pps / 14)
         return String(format: "%.1f×", x)
     }
+
+    /// Zoomed past the base scale — tints the zoom pill terracotta (mockup Frame 4).
+    private var zoomed: Bool { pps > 14.5 }
 
     // MARK: - Playback row (−1f · play/pause · +1f)
 
@@ -517,13 +522,32 @@ struct PolishView: View {
         let step = rulerStep
         let marks = Array(stride(from: 0.0, through: max(total, step), by: step))
         return ZStack(alignment: .topLeading) {
+            // Faint frame ticks under the labels once zoomed near frame level (matches the mockup's
+            // zoomed "frame ruler"). Hidden at coarse zoom where they'd just be noise.
+            if pps >= 60 {
+                Canvas { ctx, size in
+                    let spacing = pps / 30                     // one tick per frame
+                    guard spacing >= 3 else { return }
+                    var x = (laneW / 2 - scrollX).truncatingRemainder(dividingBy: spacing)
+                    if x < 0 { x += spacing }
+                    while x < size.width {
+                        ctx.fill(Path(CGRect(x: gutter + x, y: rulerH - 4, width: 1, height: 4)),
+                                 with: .color(Color.veCharcoal.opacity(0.15)))
+                        x += spacing
+                    }
+                }
+                .allowsHitTesting(false)
+            }
             ForEach(marks, id: \.self) { τ in
                 Text(step >= 1 ? clock(τ) : timecode(τ))
                     .font(VeFont.mono(8)).foregroundStyle(Color.veFaintGray).fixedSize()
                     .offset(x: gutter + xFor(τ, laneW), y: 5)
             }
         }
-        .frame(height: rulerH, alignment: .topLeading)
+        // Must fill the lane width: the labels are positioned with `.offset`, which doesn't grow the
+        // ZStack, so without an explicit width the frame collapses to one label and `.clipped()` would
+        // erase every mark. (Every other lane already uses `maxWidth: .infinity` for this reason.)
+        .frame(maxWidth: .infinity, minHeight: rulerH, maxHeight: rulerH, alignment: .topLeading)
         .clipped()
     }
 
@@ -946,18 +970,27 @@ struct PolishView: View {
         store?.isolatedAudio.contains { $0.startProxy <= clip.inPoint + 0.01 && $0.endProxy >= clip.outPoint - 0.01 } ?? false
     }
 
-    /// The Audio track's body: a green bar under each spine clip whose voice has been cleaned, shown when
-    /// the Cleaned toggle is on. Empty otherwise. Positioned in timeline coords like the other lanes.
+    /// The Audio track's body (mockup Frame 1): a faux voice waveform under every spine clip — terracotta
+    /// by default, **green** where that clip's voice has been cleaned (Cleaned toggle on), and faded for
+    /// muted clips. The bar heights are decorative (deterministic per clip, not sampled) but the segments
+    /// track the real cut, so muted/cleaned state and clip boundaries read at a glance.
     @ViewBuilder
     private func audioLaneContent(_ laneW: CGFloat) -> some View {
-        if let store, store.useIsolatedAudio, !store.isolatedAudio.isEmpty {
+        if let store, !store.order.isEmpty {
             ZStack(alignment: .topLeading) {
-                ForEach(store.order, id: \.id) { clip in
-                    if isClipCleaned(clip) {
-                        Capsule().fill(Color.veSage.opacity(0.55))
-                            .frame(width: max(2, CGFloat(clip.timelineDuration) * pps - 2), height: audioH - 8)
-                            .offset(x: xFor(store.baseStart(of: clip.id), laneW) + 1, y: 4)
+                ForEach(Array(store.order.enumerated()), id: \.element.id) { idx, clip in
+                    let cleaned = store.useIsolatedAudio && isClipCleaned(clip)
+                    let muted = clip.clampedVolume <= 0.001
+                    let tint = cleaned ? Color.veSage : Color.veTerracotta
+                    let w = max(2, CGFloat(clip.timelineDuration) * pps - 2)
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 4, style: .continuous).fill(tint.opacity(0.12))
+                        WaveformBar(color: tint.opacity(muted ? 0.18 : 0.5), seed: idx + 1)
+                            .padding(.horizontal, 3)
                     }
+                    .frame(width: w, height: audioH - 4)
+                    .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).stroke(tint.opacity(0.24), lineWidth: 1))
+                    .offset(x: xFor(store.baseStart(of: clip.id), laneW) + 1, y: 2)
                 }
             }
             .frame(width: laneW, height: audioH, alignment: .topLeading)
@@ -1701,19 +1734,34 @@ struct PolishView: View {
                         .foregroundStyle(Color.veWarmGray)
                 }
             } else {
+                let minDur = VoiceIsolationCoordinator.minDurationSeconds
+                let entireOK = store.baseDuration >= minDur
+                let selectedClip: Clip? = {
+                    if case .base(let cid) = selection { return store.order.first(where: { $0.id == cid }) }
+                    return nil
+                }()
+                let clipOK = (selectedClip?.sourceDuration ?? 0) >= minDur
                 HStack(spacing: 10) {
                     inspectorButton(store.isolatedAudio.isEmpty ? "Isolate entire video" : "Re-isolate all",
                                     "mic.fill", tint: Color.veTerracotta) {
                         voiceIso.start(session: session, scope: .entire)
                     }
-                    if case .base(let cid) = selection, let clip = store.order.first(where: { $0.id == cid }) {
+                    .disabled(!entireOK)
+                    .opacity(entireOK ? 1 : 0.4)
+                    if let clip = selectedClip {
                         inspectorButton("This clip", "wand.and.stars", tint: Color.veSage) {
                             voiceIso.start(session: session, scope: .clip(start: clip.inPoint, end: clip.outPoint))
                         }
+                        .disabled(!clipOK)
+                        .opacity(clipOK ? 1 : 0.4)
                     }
                 }
                 if case .failed(let msg) = voiceIso.phase {
                     Text(msg).font(VeFont.sans(10)).foregroundStyle(Color.veTerracotta).lineLimit(3)
+                } else if !entireOK {
+                    ReasonNote(text: "Your video is \(String(format: "%.1f", store.baseDuration))s. Voice isolation needs at least \(Int(minDur)) seconds — add or pick a longer clip.")
+                } else if let clip = selectedClip, !clipOK {
+                    ReasonNote(text: "This clip is \(String(format: "%.1f", clip.sourceDuration))s. Isolating one clip needs at least \(Int(minDur)) seconds — try “Isolate entire video” or pick a longer clip.")
                 } else {
                     Text(voiceHint(store)).font(VeFont.sans(10)).foregroundStyle(Color.veNoteText)
                 }
@@ -1941,6 +1989,32 @@ struct PolishView: View {
     /// M:SS clock label for the ruler.
     private func clock(_ t: Double) -> String {
         let s = Int(t.rounded()); return String(format: "%d:%02d", s / 60, s % 60)
+    }
+}
+
+// MARK: - Faux audio waveform
+
+/// A decorative waveform fill for the AUDIO lane: vertical bars at pseudo-random heights, centered and
+/// fading toward the edges. Heights are a deterministic hash of (bar index, seed) so the same clip always
+/// draws the same shape — no per-frame jitter, no asset sampling. Drawn in a `Canvas` for cheap redraws.
+private struct WaveformBar: View {
+    let color: Color
+    let seed: Int
+    var body: some View {
+        Canvas { ctx, size in
+            let barW: CGFloat = 1.5, gap: CGFloat = 2.5
+            let step = barW + gap
+            var x: CGFloat = 1
+            var i = 0
+            while x < size.width {
+                let s = sin(Double(i) * 12.9898 + Double(seed) * 4.1414) * 43758.5453
+                let n = s - floor(s)                                  // 0…1 pseudo-random
+                let h = max(2, CGFloat(0.22 + 0.78 * n) * size.height)
+                let rect = CGRect(x: x, y: (size.height - h) / 2, width: barW, height: h)
+                ctx.fill(Path(roundedRect: rect, cornerRadius: barW / 2), with: .color(color))
+                x += step; i += 1
+            }
+        }
     }
 }
 

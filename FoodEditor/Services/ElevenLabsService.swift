@@ -76,7 +76,8 @@ final class ElevenLabsService {
         let (data, resp) = try await session.upload(for: req, from: body)
         let http = resp as? HTTPURLResponse
         let contentType = http?.value(forHTTPHeaderField: "Content-Type") ?? ""
-        Log.audio("ElevenLabs response: \(http?.statusCode ?? -1), Content-Type=\(contentType.isEmpty ? "—" : contentType), \(ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file)).")
+        let hex = data.prefix(12).map { String(format: "%02X", $0) }.joined(separator: " ")
+        Log.audio("ElevenLabs response: status=\(http?.statusCode ?? -1), Content-Type=\(contentType.isEmpty ? "—" : contentType), recv=\(data.count)B (sent=\(audio.count)B\(data.count == audio.count ? " ⚠️ SAME SIZE AS SENT" : "")), first12=[\(hex)].")
         guard http?.statusCode == 200 else {
             throw ElevenLabsError.http(http?.statusCode ?? -1, String(decoding: data, as: UTF8.self))
         }

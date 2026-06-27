@@ -138,17 +138,40 @@ final class GeminiService: VideoAnalyzing {
     /// progress label (`.active`), the raw Edit Plan JSON (`.done`), or the failure reason (`.failed`).
     enum JobState { case active(String); case done(String); case failed(String) }
 
-    /// Kick off the server-side analysis job (poll+generate run on Supabase, NOT the phone) and get back
-    /// its id. `prompt` is the fully-assembled prompt; the response schema is single-sourced via
-    /// `generatePayload`. After this returns, the user can close the app — the job finishes server-side.
+    /// Kick off the server-side **edit-plan** job (poll+generate run on Supabase, NOT the phone) and get
+    /// back its id. `prompt` is the fully-assembled prompt; the response schema is single-sourced here.
+    /// After this returns, the user can close the app — the job finishes server-side.
     func startAnalysisJob(fileURI: String, fileName: String, mimeType: String,
                           prompt: String, model: String? = nil) async throws -> String {
+        try await startJob(fileURI: fileURI, fileName: fileName, mimeType: mimeType,
+                           prompt: prompt, schema: Self.responseSchema, model: model)
+    }
+
+    /// Kick off the server-side **style-extraction** job — same runner, but with NO response schema
+    /// (matches the on-device `rawStyleTemplateJSON`; `StyleProfileRaw` decodes defensively).
+    func startStyleExtractionJob(fileURI: String, fileName: String, mimeType: String,
+                                 prompt: String, model: String? = nil) async throws -> String {
+        try await startJob(fileURI: fileURI, fileName: fileName, mimeType: mimeType,
+                           prompt: prompt, schema: nil, model: model)
+    }
+
+    /// Shared body: POST `analyze` with the assembled payload (prompt + optional schema), return the jobId.
+    private func startJob(fileURI: String, fileName: String, mimeType: String,
+                          prompt: String, schema: [String: Any]?, model: String?) async throws -> String {
         let cfg = try proxyConfig()
-        let payload = Self.generatePayload(fileURI: fileURI, mimeType: mimeType,
-                                           prompt: prompt, schema: Self.responseSchema)
-        let req = try proxyRequest(cfg, op: "analyze",
-            fields: ["fileUri": fileURI, "fileName": fileName, "mimeType": mimeType,
-                     "payload": payload, "model": model ?? self.model])
+        let payload = Self.generatePayload(fileURI: fileURI, mimeType: mimeType, prompt: prompt, schema: schema)
+        var fields: [String: Any] = ["fileUri": fileURI, "fileName": fileName, "mimeType": mimeType,
+                                     "payload": payload, "model": model ?? self.model]
+        // Attach the APNs token so the server can push when the job finishes while the app is closed.
+        // Omitted when not yet registered (perms denied / pre-Push-capability) → server skips the push.
+        // The env must match the `aps-environment` entitlement: development (sandbox) for dev builds.
+        if let token = NotificationService.shared.deviceTokenHex { fields["deviceToken"] = token }
+        #if DEBUG
+        fields["apnsEnv"] = "sandbox"
+        #else
+        fields["apnsEnv"] = "production"
+        #endif
+        let req = try proxyRequest(cfg, op: "analyze", fields: fields)
         let (data, resp) = try await session.data(for: req)
         guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
             throw GeminiError.http((resp as? HTTPURLResponse)?.statusCode ?? -1, String(data: data, encoding: .utf8) ?? "")
@@ -175,6 +198,35 @@ final class GeminiService: VideoAnalyzing {
         case "generating": return .active("Almost ready")
         default:           return .active("Analyzing on the server")
         }
+    }
+
+    /// Polls a server job to completion. The work runs server-side, so a dropped poll (e.g. a suspend
+    /// mid-request) is harmless — transient network errors are swallowed and retried until the deadline.
+    /// `onActive` fires with the current stage label each tick (callers hop to the main actor as needed).
+    /// Throws on a genuine job failure (`.failed`), cancellation, or the overall timeout. Shared by both
+    /// coordinators' poll loops.
+    func awaitJobResult(jobId: String, timeout: TimeInterval = 300,
+                        onActive: @escaping (String) -> Void = { _ in }) async throws -> String {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            try Task.checkCancellation()
+            do {
+                switch try await jobStatus(jobId: jobId) {
+                case .done(let raw):     return raw
+                case .failed(let why):   throw GeminiError.badRequest(why)   // genuine job failure — surface it
+                case .active(let stage): onActive(stage)
+                }
+            } catch let e as GeminiError {
+                if case .badRequest = e { throw e }                 // job-level failure → fatal
+                Log.gemini("Status poll blip (will retry): \(e.localizedDescription)")   // HTTP blip → transient
+            } catch is CancellationError {
+                throw CancellationError()                           // superseded / torn down — propagate
+            } catch {
+                Log.gemini("Status poll blip (will retry): \(error.localizedDescription)")   // e.g. -1005 after a suspend
+            }
+            try await Task.sleep(nanoseconds: 2_500_000_000)
+        }
+        throw GeminiError.timedOut("server job didn't finish in time")
     }
 
     // MARK: - Supabase proxy config
@@ -306,14 +358,15 @@ final class GeminiService: VideoAnalyzing {
                 "voiceover_reason":    ["type": "STRING", "nullable": true],
                 "confidence":          ["type": "NUMBER"],
                 "edit_note":           ["type": "STRING"],
-                "section":             ["type": "STRING", "enum": ["intro", "middle", "end"]]
+                "section":             ["type": "STRING", "enum": ["intro", "middle", "end"]],
+                "topic":               ["type": "STRING"]
             ] as [String: Any],
             "propertyOrdering": ["id", "start_seconds", "end_seconds", "scene_type", "description",
                                  "hook_score", "keep", "trim_to_seconds", "voiceover_candidate",
-                                 "voiceover_reason", "confidence", "edit_note", "section"],
+                                 "voiceover_reason", "confidence", "edit_note", "section", "topic"],
             "required": ["id", "start_seconds", "end_seconds", "scene_type", "description",
                          "hook_score", "keep", "trim_to_seconds", "voiceover_candidate",
-                         "voiceover_reason", "confidence", "edit_note", "section"]
+                         "voiceover_reason", "confidence", "edit_note", "section", "topic"]
         ]
 
         let brollPlacementSchema: [String: Any] = [
@@ -356,7 +409,16 @@ final class GeminiService: VideoAnalyzing {
     /// request the on-device `generate` did — prompt + schema stay single-sourced here in Swift, and the
     /// Edge Function just forwards this verbatim.
     static func generatePayload(fileURI: String, mimeType: String, prompt: String, schema: [String: Any]?) -> [String: Any] {
-        var generationConfig: [String: Any] = ["responseMimeType": "application/json", "temperature": 0]
+        // temperature 0 + topK 1 = greedy decoding; a fixed seed makes Gemini best-effort return the SAME
+        // output for the SAME input (prompt + video). Not bit-identical — the proxy is re-encoded each run
+        // and 2.5-flash reasons over video — but far more consistent than before. Flows through the proxy
+        // verbatim (no edge-function change) and covers every path (sync generate, async job, edit + style).
+        var generationConfig: [String: Any] = [
+            "responseMimeType": "application/json",
+            "temperature": 0,
+            "topK": 1,
+            "seed": 7
+        ]
         if let schema { generationConfig["responseSchema"] = schema }
         return [
             "contents": [[

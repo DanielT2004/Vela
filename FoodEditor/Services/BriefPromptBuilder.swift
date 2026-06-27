@@ -24,7 +24,7 @@ enum BriefPromptBuilder {
             let ordered = b.hookSequence.enumerated()
                 .map { "\($0.offset + 1)) \($0.element.phrasing) [\($0.element.sceneType)]" }
                 .joined(separator: ", ")
-            lines.append("- Opening sequence: open the video with these shots in THIS exact order, back-to-back, each using the strongest available segment of that type: \(ordered). Put them at the very top of final_edit_order and boost hook_score for matching segments. If a requested type isn't in the footage, skip it and continue with the next.")
+            lines.append("- Cold open: open the video with these shots in THIS exact order, back-to-back, each using the strongest available segment of that type: \(ordered). This is a COLD OPEN — these play FIRST, before the intro, even if a shot naturally belongs to a later section; put them at the very top of final_edit_order and boost their hook_score, then continue with the intro and the rest in intro → middle → end order. If a requested type isn't in the footage, skip it and continue with the next.")
         }
 
         // 3 — voiceover/b-roll lean → voiceover_candidate + broll_placements

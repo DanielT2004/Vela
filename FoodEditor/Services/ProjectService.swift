@@ -15,6 +15,10 @@ final class ProjectService {
     private var createdAt = Date()
     private var name = "Untitled cut"
 
+    /// The durable proxy location for the current project (where `save` persists the ~720p proxy). Lets a
+    /// resumed session repoint off its ephemeral PendingAnalysis copy onto this stable file.
+    var currentProxyURL: URL? { currentId.map { store.proxyURL(for: $0) } }
+
     init(store: ProjectStore = FileProjectStore.shared) { self.store = store }
 
     /// Saved projects for the Home grid (newest-edited first).

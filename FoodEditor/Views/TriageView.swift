@@ -102,16 +102,20 @@ struct TriageView: View {
     private var store: EditPlanStore? { session.store }
     private var proxyURL: URL? { session.merged?.url }
 
-    /// The live edit order as segment ids: main spine (deduped, in play order) → B-roll pool → cut tray.
-    /// Used for the first render; then frozen into `deckIds`.
+    /// Every segment as a card, grouped into the AI's **content sections** by `topic` (all the
+    /// chicken-sandwich clips together, the fries together, …) so the creator swipes section-by-section
+    /// instead of through jumbled footage. Sections order by upload appearance and stay chronological
+    /// within; an untagged plan falls back to plain chronological order (see `TopicGrouping`). Each card
+    /// still shows the AI's verdict + live status; swiping keeps/cuts the clip without reshuffling the
+    /// deck (it's frozen into `deckIds` on appear by buildDeck()).
     private var liveDeckIds: [Int] {
         guard let store else { return [] }
-        var seen = Set<Int>(); var ids: [Int] = []
-        for c in store.order where seen.insert(c.sourceSegmentId).inserted { ids.append(c.sourceSegmentId) }
-        for id in store.brollClips where seen.insert(id).inserted { ids.append(id) }
-        for id in store.cutTray where seen.insert(id).inserted { ids.append(id) }
-        return ids
+        let chrono = store.plan.segments.sorted { $0.startSeconds < $1.startSeconds }.map(\.id)
+        return TopicGrouping.groupedOrder(chrono, segmentsById: store.segmentsById)
     }
+
+    /// The content-section the current card belongs to (its `topic`), or "" when untagged.
+    private var currentSection: String { currentSegment.map(TopicGrouping.sectionLabel) ?? "" }
 
     private var queue: [Segment] {
         (deckIds.isEmpty ? liveDeckIds : deckIds).compactMap { store?.segment($0) }
@@ -161,6 +165,8 @@ struct TriageView: View {
         ZStack {
             VStack(spacing: 0) {
                 progressHeader
+                sectionBanner
+                    .animation(.spring(response: 0.42, dampingFraction: 0.82), value: currentSection)
                 // The AI-reset shortcut only on the very first pass — once you've edited, hide it so a
                 // stray tap can't wipe your work ("Re-sort everything" is the deliberate path for that).
                 if !isDone && session.furthestStage == .sort { acceptPicksBanner }
@@ -201,6 +207,18 @@ struct TriageView: View {
             .padding(.trailing, 22)
         }
         .padding(.bottom, 6)
+    }
+
+    /// Shows the content-section the current card belongs to; the `.id(currentSection)` swaps it with a
+    /// slide-in whenever the creator enters a new section, so they always know "what's this part about".
+    @ViewBuilder private var sectionBanner: some View {
+        if !isDone, !currentSection.isEmpty {
+            SectionPill(label: currentSection)
+                .id(currentSection)
+                .transition(.asymmetric(insertion: .move(edge: .trailing).combined(with: .opacity),
+                                        removal: .opacity))
+                .padding(.bottom, 6)
+        }
     }
 
     private var autoPlayToggle: some View {

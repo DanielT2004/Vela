@@ -13,7 +13,7 @@
 //   start    { numBytes, mimeType?, displayName? }           -> { uploadUrl }          (key-bearing)
 //   poll     { name }                                         -> Gemini file JSON (verbatim)
 //   generate { payload, model? }                              -> generateContent JSON (verbatim)
-//   analyze  { fileUri, fileName, mimeType, payload, model? } -> { jobId }              (async job)
+//   analyze  { fileUri, fileName, mimeType, payload, model?, deviceToken?, apnsEnv? } -> { jobId } (async job)
 //   status   { jobId }                                        -> { status, result?, error? }
 // Any other op is rejected — this is an allowlist, not an open pass-through.
 //
@@ -38,6 +38,14 @@ const GEMINI_BASE = "https://generativelanguage.googleapis.com";
 // the `jobs` table with service-role access (which bypasses RLS). Empty only in a bare local run.
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+
+// APNs (Apple Push) secrets — set these to light up "notify when the job finishes while the app is
+// fully closed". All optional: if any is missing the worker just skips the push (the job still runs and
+// the client's local notification still covers the foreground case). See 0002_jobs_apns.sql.
+const APNS_KEY_ID = Deno.env.get("APNS_KEY_ID") ?? "";
+const APNS_TEAM_ID = Deno.env.get("APNS_TEAM_ID") ?? "";
+const APNS_BUNDLE_ID = Deno.env.get("APNS_BUNDLE_ID") ?? "";
+const APNS_AUTH_KEY = Deno.env.get("APNS_AUTH_KEY") ?? "";   // full .p8 PEM contents
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -103,6 +111,128 @@ async function dbGetJob(
   return rows[0] ?? null;
 }
 
+/// Read just the push fields for a finished job — kept separate from dbGetJob so the worker can fetch
+/// the device token without widening the client-facing `status` shape.
+async function dbGetJobPush(
+  id: string,
+): Promise<{ device_token: string | null; apns_env: string | null } | null> {
+  const r = await fetch(
+    `${SUPABASE_URL}/rest/v1/jobs?id=eq.${id}&select=device_token,apns_env`,
+    { headers: dbHeaders() },
+  );
+  if (!r.ok) return null;
+  const rows = await r.json();
+  return rows[0] ?? null;
+}
+
+// --- APNs push (HTTP/2 + ES256 JWT, no SDK) -----------------------------------------------------
+//
+// Notifies the device when a job finishes EVEN IF THE APP IS FULLY CLOSED — the one thing a local
+// `UNUserNotificationCenter` notification can't do. The JWT is signed with the team's APNs Auth Key
+// (.p8) via Web Crypto; Apple lets one token live 20–60 min, so we cache it.
+
+function apnsB64Url(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/// Decode a PKCS#8 PEM (the .p8 body) to raw DER bytes for crypto.subtle.importKey.
+function apnsPemToPkcs8(pem: string): Uint8Array {
+  const body = pem
+    .replace(/-----BEGIN [^-]+-----/, "").replace(/-----END [^-]+-----/, "")
+    .replace(/\s+/g, "");
+  const raw = atob(body);
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+}
+
+let apnsJwtCache: { token: string; iat: number } | null = null;
+
+async function apnsJwt(): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  if (apnsJwtCache && now - apnsJwtCache.iat < 3000) return apnsJwtCache.token;   // reuse <50 min
+  const header = apnsB64Url(new TextEncoder().encode(JSON.stringify({ alg: "ES256", kid: APNS_KEY_ID })));
+  const claims = apnsB64Url(new TextEncoder().encode(JSON.stringify({ iss: APNS_TEAM_ID, iat: now })));
+  const signingInput = `${header}.${claims}`;
+  const key = await crypto.subtle.importKey(
+    "pkcs8", apnsPemToPkcs8(APNS_AUTH_KEY),
+    { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"],
+  );
+  const sig = new Uint8Array(await crypto.subtle.sign(
+    { name: "ECDSA", hash: "SHA-256" }, key, new TextEncoder().encode(signingInput),
+  ));
+  // Web Crypto already emits the raw r||s signature APNs JWTs require (no DER unwrap needed).
+  const token = `${signingInput}.${apnsB64Url(sig)}`;
+  apnsJwtCache = { token, iat: now };
+  return token;
+}
+
+/// Best-effort push. Never throws — a delivery failure must not flip a finished job to 'failed'.
+async function sendApnsPush(
+  deviceToken: string,
+  title: string,
+  body: string,
+  env: "sandbox" | "production",
+  custom: Record<string, unknown> = {},
+): Promise<void> {
+  if (!deviceToken || !APNS_AUTH_KEY || !APNS_KEY_ID || !APNS_TEAM_ID || !APNS_BUNDLE_ID) {
+    console.log(`[apns] skip — missing device token or APNs secrets`);
+    return;
+  }
+  // Hard timeout so a stalled APNs connection (e.g. an HTTP/2 negotiation that never completes on the
+  // Edge runtime) can't hang the worker and starve/​orphan the analysis job. Best-effort: abort and move on.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10_000);
+  try {
+    const host = env === "production" ? "api.push.apple.com" : "api.sandbox.push.apple.com";
+    const jwt = await apnsJwt();
+    const payload = JSON.stringify({ aps: { alert: { title, body }, sound: "default" }, ...custom });
+    const r = await fetch(`https://${host}/3/device/${deviceToken}`, {
+      method: "POST",
+      headers: {
+        "authorization": `bearer ${jwt}`,
+        "apns-topic": APNS_BUNDLE_ID,
+        "apns-push-type": "alert",
+        "apns-priority": "10",
+        "content-type": "application/json",
+      },
+      body: payload,
+      signal: ctrl.signal,
+    });
+    if (r.status === 200) {
+      console.log(`[apns] delivered to ${deviceToken.slice(0, 8)}… (${env})`);
+      return;
+    }
+    const text = await r.text();
+    console.error(`[apns] HTTP ${r.status} (${env}) — ${text}`);
+    if (r.status === 410) console.warn(`[apns] token unregistered (410) — should be purged later`);
+  } catch (e) {
+    console.error(`[apns] send threw: ${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/// Push the job's outcome to the device (if it registered a token). Reads the token/env back from the
+/// row so it works regardless of which process wrote the result (e.g. the relaunch-recovery path).
+async function notifyJobFinished(jobId: string, success: boolean): Promise<void> {
+  // Fully isolated: a push is best-effort and must NEVER throw into runJob (which would flip a finished
+  // job's outcome) — every failure mode is swallowed here and in `sendApnsPush`.
+  try {
+    const push = await dbGetJobPush(jobId);
+    if (!push?.device_token) return;
+    const env = push.apns_env === "production" ? "production" : "sandbox";
+    if (success) {
+      await sendApnsPush(push.device_token, "Your cut is ready 🍴", "Tap to see your results.", env,
+                         { screen: "analysis", jobId });
+    } else {
+      await sendApnsPush(push.device_token, "Analysis hit a snag", "Open Vela to try again.", env,
+                         { screen: "analysis", jobId });
+    }
+  } catch (e) {
+    console.error(`[apns] notify threw for ${jobId}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 // --- the async analysis worker (runs AFTER the HTTP response, via EdgeRuntime.waitUntil) --------
 //
 // This is the loop that used to run on the phone: poll files.get until ACTIVE, call
@@ -116,7 +246,15 @@ async function runJob(
   model: string,
   key: string,
 ): Promise<void> {
+  const t0 = Date.now();
+  const elapsed = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
+  // Mark the job failed AND push the bad news to the device (so a closed-app user isn't left waiting).
+  const fail = async (error: string) => {
+    await dbUpdateJob(jobId, { status: "failed", error });
+    await notifyJobFinished(jobId, false);
+  };
   try {
+    console.log(`[runJob ${jobId}] start — polling files.get for ${fileName}`);
     // Step 1 — poll files.get until ACTIVE (mirrors waitUntilActive). ~170s budget so we self-bail
     // to 'failed' BEFORE the runtime's wall-clock cap rather than orphaning the row at 'active'.
     const deadline = Date.now() + 170_000;
@@ -124,33 +262,35 @@ async function runJob(
     while (Date.now() < deadline) {
       const g = await fetch(`${GEMINI_BASE}/v1beta/${fileName}?key=${key}`);
       if (!g.ok) {
-        await dbUpdateJob(jobId, { status: "failed", error: `poll HTTP ${g.status}: ${(await g.text()).slice(0, 300)}` });
+        await fail(`poll HTTP ${g.status}: ${(await g.text()).slice(0, 300)}`);
         return;
       }
       const f = await g.json();
       state = f.state ?? "";
       if (state === "ACTIVE") break;
       if (state === "FAILED") {
-        await dbUpdateJob(jobId, { status: "failed", error: "Gemini failed to process the uploaded video." });
+        await fail("Gemini failed to process the uploaded video.");
         return;
       }
       await new Promise((res) => setTimeout(res, 2000));
     }
     if (state !== "ACTIVE") {
-      await dbUpdateJob(jobId, { status: "failed", error: "Timed out: file never became ACTIVE." });
+      await fail("Timed out: file never became ACTIVE.");
       return;
     }
 
     // Step 2 — generateContent (the long call). Forward the client's payload verbatim.
     await dbUpdateJob(jobId, { status: "generating" });
+    console.log(`[runJob ${jobId}] file ACTIVE at ${elapsed()} — calling generateContent (${model})`);
     const g = await fetch(`${GEMINI_BASE}/v1beta/models/${model}:generateContent?key=${key}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
     const text = await g.text();
+    console.log(`[runJob ${jobId}] generateContent HTTP ${g.status} at ${elapsed()}, ${text.length} chars`);
     if (!g.ok) {
-      await dbUpdateJob(jobId, { status: "failed", error: `Gemini HTTP ${g.status}: ${text.slice(0, 300)}` });
+      await fail(`Gemini HTTP ${g.status}: ${text.slice(0, 300)}`);
       return;
     }
 
@@ -162,13 +302,13 @@ async function runJob(
     try {
       parsed = JSON.parse(text);
     } catch {
-      await dbUpdateJob(jobId, { status: "failed", error: "Gemini returned non-JSON." });
+      await fail("Gemini returned non-JSON.");
       return;
     }
 
     const block = parsed?.promptFeedback?.blockReason;
     if (block) {
-      await dbUpdateJob(jobId, { status: "failed", error: `Gemini returned no usable text (blocked: ${block}).` });
+      await fail(`Gemini returned no usable text (blocked: ${block}).`);
       return;
     }
 
@@ -177,16 +317,23 @@ async function runJob(
       .join("");
     if (!out) {
       const finish = parsed?.candidates?.[0]?.finishReason ?? "none";
-      await dbUpdateJob(jobId, { status: "failed", error: `Gemini returned no usable text (finishReason: ${finish}).` });
+      await fail(`Gemini returned no usable text (finishReason: ${finish}).`);
       return;
     }
 
     await dbUpdateJob(jobId, { status: "done", result: out });
-  } catch (_e) {
-    // Best-effort terminal state so the client's poll doesn't hang on a silent worker crash.
+    console.log(`[runJob ${jobId}] done at ${elapsed()}, ${out.length} chars`);
+    await notifyJobFinished(jobId, true);
+  } catch (e) {
+    // Capture the REAL error so we can diagnose (the old code swallowed it into a generic message).
+    const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+    console.error(`[runJob ${jobId}] worker threw at ${elapsed()}: ${detail}`,
+                  e instanceof Error ? e.stack : "");
     try {
-      await dbUpdateJob(jobId, { status: "failed", error: "Analysis worker failed." });
-    } catch { /* swallow — nothing more we can do */ }
+      await fail(`Worker error (${elapsed()}): ${detail}`.slice(0, 500));
+    } catch (e2) {
+      console.error(`[runJob ${jobId}] could not record failure:`, e2);
+    }
   }
 }
 
@@ -269,6 +416,10 @@ Deno.serve(async (req) => {
         const mimeType = body.mimeType;
         const payload = body.payload;
         const model = typeof body.model === "string" ? body.model : "gemini-2.5-flash";
+        // Optional APNs fields — let the worker push when the job finishes while the app is closed. Not
+        // part of the validation gate: a tokenless client (perms denied / not yet registered) still runs.
+        const deviceToken = typeof body.deviceToken === "string" && body.deviceToken ? body.deviceToken : null;
+        const apnsEnv = body.apnsEnv === "production" ? "production" : "sandbox";
         if (
           typeof fileUri !== "string" || !fileUri ||
           typeof fileName !== "string" || !fileName ||
@@ -287,6 +438,8 @@ Deno.serve(async (req) => {
           mime_type: mimeType,
           payload,
           model,
+          device_token: deviceToken,
+          apns_env: apnsEnv,
         });
         // Keep the worker alive past this HTTP response — the job runs to completion server-side.
         EdgeRuntime.waitUntil(runJob(jobId, fileName, payload, model, key));

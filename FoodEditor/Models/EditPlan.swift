@@ -101,6 +101,12 @@ struct Segment: Codable, Identifiable, Equatable {
     let confidence: Double
     let editNote: String
     let section: VideoSection
+    /// The **content section** this clip belongs to — a short label naming what this part of the
+    /// video is about (a dish like "Chicken Sandwich", or any chapter: "Arriving", "The verdict").
+    /// Same-`topic` clips are grouped into contiguous sections in Triage + the Timeline. Empty when
+    /// the model omits it or an older saved plan predates the field — grouping then no-ops (see
+    /// `TopicGrouping`).
+    let topic: String
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -116,6 +122,7 @@ struct Segment: Codable, Identifiable, Equatable {
         case confidence
         case editNote = "edit_note"
         case section
+        case topic
     }
 
     init(from decoder: Decoder) throws {
@@ -133,13 +140,14 @@ struct Segment: Codable, Identifiable, Equatable {
         confidence         = try c.lenientDouble(.confidence) ?? 1
         editNote           = (try? c.decode(String.self, forKey: .editNote)) ?? ""
         section            = (try? c.decode(VideoSection.self, forKey: .section)) ?? .unknown
+        topic              = (try? c.decode(String.self, forKey: .topic)) ?? ""
     }
 
     /// Memberwise initializer kept for previews / tests.
     init(id: Int, startSeconds: Double, endSeconds: Double, sceneType: SceneType,
          description: String, hookScore: Double, keep: Bool, trimToSeconds: Double?,
          voiceoverCandidate: Bool, voiceoverReason: String?, confidence: Double, editNote: String,
-         section: VideoSection = .unknown) {
+         section: VideoSection = .unknown, topic: String = "") {
         self.id = id
         self.startSeconds = startSeconds
         self.endSeconds = endSeconds
@@ -153,6 +161,7 @@ struct Segment: Codable, Identifiable, Equatable {
         self.confidence = confidence
         self.editNote = editNote
         self.section = section
+        self.topic = topic
     }
 
     /// A synthetic segment for a camera-roll clip appended AFTER analysis (no Gemini). Covers the clip's
@@ -179,6 +188,7 @@ struct Segment: Codable, Identifiable, Equatable {
         try c.encode(confidence, forKey: .confidence)
         try c.encode(editNote, forKey: .editNote)
         try c.encode(section, forKey: .section)
+        try c.encode(topic, forKey: .topic)
     }
 
     /// True when the AI was unsure enough that the doc says we should flag for review (~0.7).
@@ -311,6 +321,29 @@ struct EditPlan: Codable, Equatable {
           broll:   \(brollPlacements.count) suggested placement(s)
           style:   \(styleMatchNotes ?? "— (generic, no active style)")
         """
+    }
+}
+
+// MARK: - Section invariant audit
+
+extension EditPlan {
+    /// Post-parse audit of the section invariants: how many kept segments land in each section, plus red
+    /// flags when a must-have is missing (intro footage that got dropped, an untagged kept segment). Logged
+    /// right after parse so a cut that silently lost the intro is visible; the user-facing notice (the
+    /// "SECTION ANALYSIS" card) is surfaced separately. Pure read — never mutates the plan.
+    var sectionAuditLine: String {
+        let kept = segments.filter { $0.keep }
+        func keptIn(_ s: VideoSection) -> Int { kept.filter { $0.section == s }.count }
+        func footageHas(_ s: VideoSection) -> Bool { segments.contains { $0.section == s } }
+
+        var flags: [String] = []
+        if footageHas(.intro) && keptIn(.intro) == 0 { flags.append("⚠️ intro footage exists but none kept") }
+        if footageHas(.end)   && keptIn(.end)   == 0 { flags.append("⚠️ no end/verdict kept") }
+        let untagged = kept.filter { $0.section == .unknown }.count
+        if untagged > 0 { flags.append("⚠️ \(untagged) kept segment(s) untagged") }
+
+        let cov = "intro \(keptIn(.intro)) · middle \(keptIn(.middle)) · end \(keptIn(.end))"
+        return flags.isEmpty ? "Sections kept — \(cov)" : "Sections kept — \(cov) — " + flags.joined(separator: "; ")
     }
 }
 

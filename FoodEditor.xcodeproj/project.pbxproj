@@ -226,6 +226,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 1A0000000000000000000010 /* Secrets.xcconfig */;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = FoodEditor/FoodEditor.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 2KU9BC4R2Z;
@@ -250,6 +251,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 1A0000000000000000000010 /* Secrets.xcconfig */;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = FoodEditor/FoodEditor.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 2KU9BC4R2Z;

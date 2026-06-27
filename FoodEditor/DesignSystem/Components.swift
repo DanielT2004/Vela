@@ -56,6 +56,45 @@ struct SceneChip: View {
     }
 }
 
+/// Full-width **content-section** header used to divide the Timeline spine by the AI's `topic`
+/// (e.g. "CHICKEN SANDWICH") — a terracotta label with a faint rule and an optional clip count.
+struct SectionHeaderRow: View {
+    let label: String
+    var count: Int? = nil
+    var body: some View {
+        HStack(spacing: 9) {
+            Text(label.uppercased())
+                .font(VeFont.sans(11.5, weight: .heavy))
+                .tracking(0.7)
+                .foregroundStyle(Color.veTerracotta)
+                .lineLimit(1)
+            Rectangle().fill(Color.veTerracotta.opacity(0.22)).frame(height: 1)
+            if let count {
+                Text("\(count)")
+                    .font(VeFont.sans(11, weight: .bold))
+                    .foregroundStyle(Color.veWarmGray)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Pill naming the section the creator is currently reviewing (Triage) — slides in when the section
+/// changes so they always know "what's this part about".
+struct SectionPill: View {
+    let label: String
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "rectangle.stack.fill").font(.system(size: 11, weight: .bold))
+            Text(label).font(VeFont.sans(13, weight: .bold)).tracking(0.2).lineLimit(1)
+        }
+        .foregroundStyle(Color.veTerracotta)
+        .padding(.horizontal, 13).padding(.vertical, 6)
+        .background(Color.veTerracotta.opacity(0.1), in: Capsule())
+        .overlay(Capsule().stroke(Color.veTerracotta.opacity(0.18), lineWidth: 1))
+    }
+}
+
 /// Full-width primary action (terracotta) — the recurring CTA across screens.
 struct PrimaryActionButton: View {
     let title: String

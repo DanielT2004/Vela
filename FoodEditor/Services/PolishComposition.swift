@@ -34,8 +34,9 @@ enum PolishComposition {
             if !active { p.setVolume(0, at: .zero) }   // ensure muted from t=0
             return p
         }
+        let origActive = !useIsolated || d.baseCleaned == nil
         var inputs: [AVMutableAudioMixInputParameters] = []
-        if let orig = d.baseOriginal { inputs.append(params(orig, active: !useIsolated || d.baseCleaned == nil)) }
+        if let orig = d.baseOriginal { inputs.append(params(orig, active: origActive)) }
         if let cleaned = d.baseCleaned { inputs.append(params(cleaned, active: useIsolated)) }
         inputs.append(contentsOf: d.overlayParams)
         let mix = AVMutableAudioMix(); mix.inputParameters = inputs; return mix
@@ -85,13 +86,16 @@ enum PolishComposition {
 
         // ── AUDIO ──
         // Cleaned-voice files loaded + cached once (Voice Isolation). Mirrors the exporter.
-        var isoCache: [URL: (track: AVAssetTrack, duration: Double)] = [:]
-        func isolatedTrack(_ url: URL) async -> (track: AVAssetTrack, duration: Double)? {
+        // Retain the AVURLAsset (not just its track) — an orphaned track inserts SILENT. (Same reason
+        // EditPlanAssembler's SourceInfo keeps its asset.) The cache is build-scoped, so assets stay
+        // alive through every insertTimeRange call.
+        var isoCache: [URL: (asset: AVURLAsset, track: AVAssetTrack, duration: Double)] = [:]
+        func isolatedTrack(_ url: URL) async -> (asset: AVURLAsset, track: AVAssetTrack, duration: Double)? {
             if let c = isoCache[url] { return c }
             let a = AVURLAsset(url: url)
             guard let t = try? await a.loadTracks(withMediaType: .audio).first else { return nil }
             let d = (try? await a.load(.duration).seconds) ?? .greatestFiniteMagnitude
-            let entry = (track: t, duration: d); isoCache[url] = entry; return entry
+            let entry = (asset: a, track: t, duration: d); isoCache[url] = entry; return entry
         }
 
         /// Insert pieces into a fresh audio track. `useCleaned` → read from the cleaned file wherever a
@@ -103,6 +107,7 @@ enum PolishComposition {
                                                     preferredTrackID: kCMPersistentTrackID_Invalid) else { return nil }
             let sorted = pieces.sorted { $0.baseStart < $1.baseStart }
             var trackEnd = CMTime.zero
+            var cleanedCount = 0, fallbackCount = 0   // diagnostics (cleaned track only)
             for p in sorted {
                 let at = CMTime(seconds: p.baseStart, preferredTimescale: 600)
                 if CMTimeCompare(at, trackEnd) > 0 {
@@ -124,12 +129,11 @@ enum PolishComposition {
                                     aTrack.scaleTimeRange(CMTimeRange(start: at, duration: r.duration),
                                                           toDuration: CMTime(seconds: p.timelineDuration, preferredTimescale: 600))
                                 }
-                                insertedCleaned = true
-                            } catch {
-                                Log.audio("⚠️ preview: cleaned insert failed @\(String(format: "%.1f", at.seconds))s (\(error.localizedDescription)) — using original.")
-                            }
+                                insertedCleaned = true; cleanedCount += 1
+                            } catch { Log.audio("⚠️ cleaned insert failed @\(String(format: "%.1f", at.seconds))s: \(error.localizedDescription)") }
                         }
                     }
+                    if !insertedCleaned { fallbackCount += 1 }
                 }
                 if !insertedCleaned, let srcAudio {   // original track, or cleaned-but-uncovered/failed piece
                     let aStart = max(0, p.sourceStart)
@@ -145,6 +149,9 @@ enum PolishComposition {
                     }
                 }
                 trackEnd = CMTime(seconds: p.baseStart + p.timelineDuration, preferredTimescale: 600)
+            }
+            if useCleaned {
+                Log.audio("cleaned track built: \(cleanedCount) cleaned / \(fallbackCount) fallback, dur=\(String(format: "%.1f", CMTimeGetSeconds(aTrack.timeRange.duration)))s.")
             }
             return aTrack
         }

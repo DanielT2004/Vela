@@ -101,7 +101,7 @@ struct EditorShellView: View {
     /// plan, reset progress, and walk the deck fresh from the top.
     private func resortEverything() {
         if let plan = session.store?.plan {
-            session.store = EditPlanStore(plan: plan)
+            session.store = EditPlanStore(plan: plan, openerCount: session.brief?.hookSequence.count ?? 0)
         }
         session.furthestStage = .sort
         withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {

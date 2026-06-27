@@ -88,7 +88,7 @@ final class EditPlanStore {
     /// span read the cleaned file instead of the source; uncovered pieces still play the original.
     var useIsolatedAudio: Bool = false
 
-    init(plan: EditPlan, brollCoverageTarget: Double = 0.25) {
+    init(plan: EditPlan, brollCoverageTarget: Double = 0.25, openerCount: Int = 0) {
         self.plan = plan
         self.brollCoverageTarget = max(0, min(1, brollCoverageTarget))
         let byId: [Int: Segment] = Dictionary(plan.segments.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
@@ -105,6 +105,31 @@ final class EditPlanStore {
         let keepIds: [Int] = plan.segments.filter { $0.keep }.map(\.id)
         var ordered: [Int] = plan.finalEditOrder.filter { keepIds.contains($0) }
         for id in keepIds where !ordered.contains(id) { ordered.append(id) }
+        // COLD OPEN + section invariant. The first `openerCount` segments are the creator's chosen
+        // opener (Gemini was told to place them at the top of final_edit_order): PIN them to the very
+        // front — they play before the intro even if they're a mid-meal shot. The REST is stable-sorted
+        // intro → middle → end so the body still flows in order. A STABLE sort keeps the model's
+        // within-section order, so it only moves a mis-placed clip into its group. openerCount == 0 →
+        // everything is section-sorted (Gemini's hook, an intro segment, leads naturally).
+        func sectionRank(_ id: Int) -> Int {
+            switch byId[id]?.section ?? .unknown {
+            case .intro: return 0; case .middle: return 1; case .end: return 2; case .unknown: return 3
+            }
+        }
+        let pinCount = min(max(0, openerCount), ordered.count)
+        let pinned = Array(ordered.prefix(pinCount))
+        let sortedRest = ordered.dropFirst(pinCount).enumerated()
+            .sorted { a, b in
+                let ra = sectionRank(a.element), rb = sectionRank(b.element)
+                return ra != rb ? ra < rb : a.offset < b.offset
+            }
+            .map(\.element)
+        // CONTENT SECTIONS — pull same-`topic` clips (a dish, the verdict, …) into contiguous sections
+        // so the spine reads section-by-section. Sections order by upload appearance; the intro lead
+        // (`sortedRest.first`) stays the hook and keeps its section first. A plan with <2 topics is
+        // returned unchanged, so this preserves the section-sorted order above. See `TopicGrouping`.
+        let groupedRest = TopicGrouping.groupedOrder(sortedRest, segmentsById: byId, leadId: sortedRest.first)
+        ordered = pinned + groupedRest
         let hook: Int? = ordered.first
 
         // Legacy default b-roll for each voiceover candidate = highest-hook food-closeup elsewhere.
@@ -120,7 +145,10 @@ final class EditPlanStore {
         // Split the spine: food close-ups become B-roll material (Layer 2), except the hook.
         let brollLayer: [Int] = ordered.filter { id in id != hook && isFoodCloseup(id) }
         self.order = ordered.filter { !brollLayer.contains($0) }.map(clip)
-        self.brollClips = brollLayer.sorted { startOf($0) < startOf($1) }
+        // Group the B-roll pool by content section too (start-sorted, then grouped) so it reads
+        // section-by-section like the spine.
+        self.brollClips = TopicGrouping.groupedOrder(brollLayer.sorted { startOf($0) < startOf($1) },
+                                                     segmentsById: byId)
         self.cutTray = plan.segments.filter { !$0.keep }.map(\.id)
         self.hookId = hook
         self.brollLane = []
@@ -725,10 +753,15 @@ final class EditPlanStore {
             hookId = ordered.first
         }
 
+        // Pull same-`topic` clips into contiguous content sections (hook's section stays first). A plan
+        // with <2 topics is returned unchanged, preserving the hook-first order above.
+        ordered = TopicGrouping.groupedOrder(ordered, segmentsById: segmentsById, leadId: hookId)
+
         let currentHook = hookId
         let brollLayer: [Int] = ordered.filter { id in id != currentHook && isFoodCloseup(id) }
         order = ordered.filter { !brollLayer.contains($0) }.map(makeClip)
-        brollClips = brollLayer.sorted { rawStart($0) < rawStart($1) }
+        brollClips = TopicGrouping.groupedOrder(brollLayer.sorted { rawStart($0) < rawStart($1) },
+                                                segmentsById: segmentsById)
         cutTray = plan.segments.filter { !$0.keep }.map(\.id)
         brollLane = seededLane(fromPlacements: plan.brollPlacements)
 

@@ -4,7 +4,7 @@ import Observation
 /// Screens in the flow, mirroring the mockup's screen state machine.
 enum AppScreen: Equatable {
     case onboarding
-    case home, picker, brief, processing, segments, editor, hook, export, profile
+    case home, picker, brief, processing, analysisReveal, segments, editor, hook, export, profile
     // Style templates
     case templateLibrary, createSource, createSelect, createAnalyzing, createReview, templateEditor
 
@@ -15,6 +15,7 @@ enum AppScreen: Equatable {
         case .picker:          return "Camera roll"
         case .brief:           return "Before we cut"
         case .processing:      return "Working"
+        case .analysisReveal:  return "Ready"
         case .segments:        return "Your breakdown"
         case .editor:          return "Editor"
         case .hook:            return "Pick your hook"

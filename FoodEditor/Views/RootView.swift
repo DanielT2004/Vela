@@ -12,6 +12,7 @@ struct RootView: View {
     @State private var auth = AuthStore()
     @State private var templates = TemplateService()
     @State private var create = CreateFlow()
+    @State private var appRoute = AppRoute.shared       // notification-tap → navigation signal
     @Environment(\.scenePhase) private var scenePhase
 
     /// Gate the first screen synchronously (no home-flash): onboarding until the creator has onboarded.
@@ -36,6 +37,8 @@ struct RootView: View {
                     BriefView()
                 case .processing:
                     ProcessingView()
+                case .analysisReveal:
+                    AnalysisRevealView()
                 case .segments:
                     SegmentListView()
                 case .editor:
@@ -109,18 +112,72 @@ struct RootView: View {
             .environment(auth)
             .environment(templates)
             .environment(create)
+            .environment(appRoute)
             .transition(.opacity.combined(with: .offset(y: 7)))
             .id(router.screen)
         }
         .animation(.easeOut(duration: 0.3), value: router.screen)
+        // Cold-launch recovery: if the app was KILLED mid-analysis, re-attach to the server job and
+        // finish. We DON'T force-navigate — the creator lands on Home, where a "Processing" card shows
+        // it's still running (HomeView reads `analysis`). Completion routes to the reveal below.
+        .task {
+            analysis.resumeIfPending(session: session, projects: projects)
+        }
+        // A notification tap (local or remote) explicitly asks to open the results; consume it once safe.
+        .onChange(of: appRoute.pending) { _, pending in
+            if pending == .analysis { routeToAnalysisIfSafe(); appRoute.pending = nil }
+        }
+        // When the analysis finishes (whether the creator is on the Home card or the full Processing
+        // page), reveal the results — guarded so it never yanks them out of an active edit.
+        .onChange(of: analysis.phase) { _, phase in
+            if phase == .done { revealIfSafe() }
+        }
         // Persist the in-progress project whenever the app backgrounds (covers app kill)…
-        .onChange(of: scenePhase) { _, phase in
-            if phase != .active { projects.save(session: session, reaching: Self.status(for: router.screen)) }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active {
+                analysis.resumeIfPending(session: session, projects: projects)   // re-attach after a kill
+                if appRoute.pending == .analysis { routeToAnalysisIfSafe(); appRoute.pending = nil }
+            } else {
+                // Backgrounding mid-compression interrupts the on-device prep (iOS suspends the
+                // AVFoundation export), so it can't finish while away. Ping the creator to come right
+                // back. Gated to `.background` (not transient `.inactive`, e.g. Control Center) and to
+                // the compress step only — uploading/analysis survive a tap-away on their own.
+                if newPhase == .background && analysis.isCompressing {
+                    NotificationService.shared.notify(
+                        title: "Open Vela to finish",
+                        body: "Compression couldn't complete while you were away — please go back to the app to finish prepping your footage."
+                    )
+                }
+                projects.save(session: session, reaching: Self.status(for: router.screen))
+            }
         }
         // …and whenever the user leaves the editor back to the Kitchen.
         .onChange(of: router.screen) { old, new in
             if new == .home && old != .home { projects.save(session: session, reaching: Self.status(for: old)) }
         }
+    }
+
+    /// A notification tap asking to open the analysis. From a "safe" pre-editor screen only (never yanks
+    /// the creator out of an active edit): if it's already finished → straight to the reveal; if still
+    /// running → the Processing page (the `analysis.phase` observer reveals it on completion). A stale tap
+    /// with nothing in flight is a harmless no-op.
+    private func routeToAnalysisIfSafe() {
+        let safe: Set<AppScreen> = [.home, .picker, .brief, .processing]
+        guard safe.contains(router.screen) else { return }
+        if analysis.phase == .done, session.store?.plan != nil {
+            router.go(.analysisReveal)
+        } else if analysis.phase == .running {
+            router.go(.processing)
+        }
+    }
+
+    /// On analysis completion, hand off to the celebratory reveal — from Home (the Processing card),
+    /// the Processing page, or the pre-brief screens. Never interrupts an active edit/export/reveal.
+    private func revealIfSafe() {
+        guard session.store?.plan != nil else { return }
+        let safe: Set<AppScreen> = [.home, .processing, .picker, .brief]
+        guard safe.contains(router.screen) else { return }
+        router.go(.analysisReveal)
     }
 
     /// Editor screens imply the project has advanced past triage.

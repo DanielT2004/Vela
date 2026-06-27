@@ -36,6 +36,9 @@ protocol ProjectStore {
     func save(_ doc: ProjectDocument, copyingProxyFrom proxyURL: URL, poster: UIImage?) throws
     /// Load a project's full document + file locations to resume editing.
     func load(id: UUID) throws -> LoadedProject
+    /// Where this project's proxy is (or would be) persisted — the durable copy that outlives a session's
+    /// scratch/PendingAnalysis files. Pure path math; doesn't require the file to exist.
+    func proxyURL(for id: UUID) -> URL
     /// The saved poster image for a project's Home tile, if one was written.
     func posterImage(for id: UUID) -> UIImage?
     func delete(id: UUID) throws
@@ -149,6 +152,9 @@ final class FileProjectStore: ProjectStore {
             throw ProjectStoreError.decodeFailed(error.localizedDescription)
         }
     }
+
+    /// Protocol-facing proxy location (delegates to the private path helper).
+    func proxyURL(for id: UUID) -> URL { proxyURL(id) }
 
     func posterImage(for id: UUID) -> UIImage? {
         let url = posterURL(id)

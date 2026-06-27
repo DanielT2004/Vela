@@ -14,6 +14,7 @@ struct HomeView: View {
     @Environment(ProjectService.self) private var projects
     @Environment(AuthStore.self) private var auth
     @Environment(TemplateService.self) private var templates
+    @Environment(AnalysisCoordinator.self) private var analysis
 
     @State private var projectList: [Project] = []
     @State private var resumingId: UUID?
@@ -26,6 +27,7 @@ struct HomeView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     header
+                    processingCard   // shows only while a server-side analysis is in flight (e.g. after reopening)
                     if let active = templates.active {
                         activeStyleCard(active).padding(.top, 22)
                         yourTemplatesCard(active).padding(.top, 12)
@@ -93,6 +95,49 @@ struct HomeView: View {
             }
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: showDeletedToast)
+    }
+
+    // MARK: in-flight analysis card
+
+    /// While a server-side analysis is running (most visibly after the creator reopened the app mid-job),
+    /// show a tappable "Processing your video" card so they know it's still happening — tap to open the
+    /// full Processing page. Reads the live `AnalysisCoordinator`; vanishes when the job finishes (and
+    /// `RootView` routes to the reveal).
+    @ViewBuilder private var processingCard: some View {
+        if analysis.phase == .running {
+            Button { router.go(.processing) } label: {
+                HStack(spacing: 14) {
+                    ZStack {
+                        Circle().stroke(Color.veTerracotta.opacity(0.18), lineWidth: 4)
+                        Circle()
+                            .trim(from: 0, to: max(0.04, analysis.progress))
+                            .stroke(Color.veTerracotta, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                            .rotationEffect(.degrees(-90))
+                            .animation(.easeOut(duration: 0.3), value: analysis.progress)
+                        Text("\(Int(analysis.progress * 100))%")
+                            .font(VeFont.mono(10, weight: .bold)).foregroundStyle(Color.veTerracotta)
+                    }
+                    .frame(width: 46, height: 46)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Processing your video")
+                            .font(VeFont.sans(15, weight: .bold)).foregroundStyle(Color.veCharcoal).lineLimit(1)
+                        Text(analysis.canCloseApp ? "You can close the app — we’ll notify you when it’s ready."
+                                                  : analysis.label)
+                            .font(VeFont.sans(12)).foregroundStyle(Color.veWarmGray).lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.veFaintGray)
+                }
+                .padding(17)
+                .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(Color.veTerracotta.opacity(0.25), lineWidth: 1.5))
+                .shadow(color: Color.veTerracotta.opacity(0.12), radius: 12, y: 4)
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 18)
+        }
     }
 
     // MARK: active style + templates cards

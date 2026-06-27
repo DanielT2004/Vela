@@ -30,6 +30,8 @@ enum AudioConvert {
 
         // processingFormat is non-interleaved float32 at the source rate/channels, whatever the on-disk format.
         let format = reader.processingFormat
+        let inSeconds = format.sampleRate > 0 ? Double(reader.length) / format.sampleRate : 0
+        Log.audio("decode in: \(Int(format.sampleRate))Hz \(format.channelCount)ch, \(reader.length) frames (\(String(format: "%.1f", inSeconds))s).")
         guard reader.length > 0 else { throw ConvertError.emptySource }
 
         let outURL = FileManager.default.temporaryDirectory
@@ -49,11 +51,16 @@ enum AudioConvert {
             throw ConvertError.writerFailed("Couldn't allocate a read buffer.")
         }
 
+        var framesWritten: AVAudioFramePosition = 0
         while reader.framePosition < reader.length {
             try reader.read(into: buffer)          // sets buffer.frameLength (partial last chunk OK)
             if buffer.frameLength == 0 { break }   // safety: nothing more to read
             try writer.write(from: buffer)         // honors frameLength; straight passthrough
+            framesWritten += AVAudioFramePosition(buffer.frameLength)
         }
+        let outDur = format.sampleRate > 0 ? Double(framesWritten) / format.sampleRate : 0
+        let outSize = ((try? FileManager.default.attributesOfItem(atPath: outURL.path))?[.size] as? Int) ?? 0
+        Log.audio("decode out: \(framesWritten) frames (\(String(format: "%.1f", outDur))s), \(ByteCountFormatter.string(fromByteCount: Int64(outSize), countStyle: .file)) caf → \(outURL.lastPathComponent).")
         return outURL
     }
 }

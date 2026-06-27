@@ -13,6 +13,10 @@ import UIKit
 @MainActor
 @Observable
 final class VoiceIsolationCoordinator {
+    /// ElevenLabs' Voice Isolator requires at least 5 seconds of audio — shorter input fails. Checked in
+    /// the UI (pre-flight, so the user sees a clean message) and again here as a backstop.
+    static let minDurationSeconds: Double = 5
+
     /// What to clean — the whole edit, or one clip's proxy-second range.
     enum Scope: Equatable {
         case entire
@@ -78,13 +82,16 @@ final class VoiceIsolationCoordinator {
             case .entire:                 start = 0;            end = max(0, proxyDuration)
             case .clip(let s, let e):     start = max(0, s);    end = min(e, proxyDuration)
             }
-            guard end - start > 0.2 else { throw IsolationError.tooShort }
+            guard end - start >= Self.minDurationSeconds else { throw IsolationError.tooShort }
             Log.audio("Voice isolation — \(scopeLabel(scope)) range [\(String(format: "%.1f", start))–\(String(format: "%.1f", end))s].")
 
             // 1) Extract the proxy audio slice → .m4a (audio-only; ElevenLabs accepts AAC).
             label = "Exporting audio"; progress = 0.12
             let m4a = try await Self.extractAudioSlice(from: asset, start: start, end: end)
             defer { try? FileManager.default.removeItem(at: m4a) }
+            let m4aDur = (try? await AVURLAsset(url: m4a).load(.duration).seconds) ?? -1
+            let m4aSize = ((try? FileManager.default.attributesOfItem(atPath: m4a.path))?[.size] as? Int) ?? 0
+            Log.audio("Extracted slice → m4a (\(String(format: "%.1f", m4aDur))s, \(ByteCountFormatter.string(fromByteCount: Int64(m4aSize), countStyle: .file))).")
             if Task.isCancelled { return }
 
             // 2) Round-trip to ElevenLabs → cleaned MP3 bytes.
@@ -121,7 +128,7 @@ final class VoiceIsolationCoordinator {
             for s in stale { try? FileManager.default.removeItem(at: s.url) }
 
             progress = 1; phase = .done
-            Log.audio("✅ Registered isolated span. Total spans: \(store.isolatedAudio.count).")
+            Log.audio("✅ Registered span [\(String(format: "%.1f", start))–\(String(format: "%.1f", end))s] cafDur=\(String(format: "%.1f", cleanedDur))s. Total spans: \(store.isolatedAudio.count).")
             NotificationService.shared.notify(title: "Clean voice ready 🎙️", body: "Tap to hear your isolated audio.")
         } catch is CancellationError {
             return
@@ -141,7 +148,7 @@ final class VoiceIsolationCoordinator {
         case tooShort, exportInit, exportFailed(String), unreadableCleaned
         var errorDescription: String? {
             switch self {
-            case .tooShort:            return "That selection is too short to isolate."
+            case .tooShort:            return "Voice isolation needs at least 5 seconds of audio — pick a longer clip."
             case .exportInit:          return "Couldn't start the audio exporter."
             case .exportFailed(let m): return "Audio export failed: \(m)"
             case .unreadableCleaned:   return "Couldn't read the cleaned audio — please try isolating again."

@@ -85,13 +85,14 @@ enum EditPlanAssembler {
         var mixParams: [AVMutableAudioMixInputParameters] = []
 
         // Cleaned-voice files (Voice Isolation) loaded + cached once. Mirrors `PolishComposition`.
-        var isoCache: [URL: (track: AVAssetTrack, duration: Double)] = [:]
-        func isolatedTrack(_ url: URL) async -> (track: AVAssetTrack, duration: Double)? {
+        // Retain the AVURLAsset (like SourceInfo) — an orphaned track inserts SILENT.
+        var isoCache: [URL: (asset: AVURLAsset, track: AVAssetTrack, duration: Double)] = [:]
+        func isolatedTrack(_ url: URL) async -> (asset: AVURLAsset, track: AVAssetTrack, duration: Double)? {
             if let c = isoCache[url] { return c }
             let a = AVURLAsset(url: url)
             guard let t = try? await a.loadTracks(withMediaType: .audio).first else { return nil }
             let d = (try? await a.load(.duration).seconds) ?? .greatestFiniteMagnitude
-            let entry = (track: t, duration: d); isoCache[url] = entry; return entry
+            let entry = (asset: a, track: t, duration: d); isoCache[url] = entry; return entry
         }
 
         /// Build one audio track (base or overlay) from clip pieces, with gaps + speed scaling, and

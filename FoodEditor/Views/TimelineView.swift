@@ -53,6 +53,9 @@ struct TimelineView: View {
     /// Layout constants: points per second of footage, and the gap between blocks.
     private let pps: CGFloat = 16
     private let gap: CGFloat = 10
+    /// Full-width content-section header row inserted before the first clip of each `topic` section.
+    private let sectionHeaderHeight: CGFloat = 30
+    private let sectionHeaderGap: CGFloat = 6
 
     /// Auto-scroll plumbing. The blocks are `.offset`-positioned in a fixed-height ZStack, so per-block
     /// `scrollTo` anchors don't work (every block shares one layout slot). Instead an invisible ruler of
@@ -63,6 +66,26 @@ struct TimelineView: View {
     private struct ScrollOffsetKey: PreferenceKey {
         static var defaultValue: CGFloat = 0
         static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+    }
+
+    /// Tracks the timeline's vertical scroll offset into `contentMinY`. iOS 18+ uses the reliable
+    /// `onScrollGeometryChange`; a GeometryReader inside ScrollView content returns 0 regardless of scroll
+    /// on iOS 26 (that was the "can't drag up" bug). Emits the blockStack top in viewport space (≈ `topPadding`
+    /// at the top, negative as you scroll down). Skips updates mid-lift so the manual `dragScrollY` offset
+    /// can't perturb the captured resting position.
+    private struct ScrollOffsetReader: ViewModifier {
+        let topPadding: CGFloat
+        let isDragging: Bool
+        let onResting: (CGFloat) -> Void
+        func body(content: Content) -> some View {
+            if #available(iOS 18.0, *) {
+                content.onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, y in
+                    if !isDragging { onResting(topPadding - y) }
+                }
+            } else {
+                content
+            }
+        }
     }
 
     var body: some View {
@@ -160,11 +183,21 @@ struct TimelineView: View {
             .frame(width: 54, height: 54)
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(seg.description.isEmpty ? seg.sceneType.label : seg.description)
                     .font(VeFont.sans(13.5, weight: .semibold)).foregroundStyle(Color.veCharcoal).lineLimit(1)
-                Text("\(seg.sceneType.label) · \(Int((seg.endSeconds - seg.startSeconds).rounded()))s")
-                    .font(VeFont.sans(11.5)).foregroundStyle(Color.veWarmGray)
+                HStack(spacing: 6) {
+                    let section = TopicGrouping.sectionLabel(seg)
+                    if !section.isEmpty {
+                        Text(section.uppercased())
+                            .font(VeFont.sans(10, weight: .bold)).tracking(0.4)
+                            .foregroundStyle(Color.veTerracotta).lineLimit(1)
+                            .padding(.horizontal, 7).padding(.vertical, 2)
+                            .background(Color.veTerracotta.opacity(0.1), in: Capsule())
+                    }
+                    Text("\(seg.sceneType.label) · \(Int((seg.endSeconds - seg.startSeconds).rounded()))s")
+                        .font(VeFont.sans(11.5)).foregroundStyle(Color.veWarmGray)
+                }
             }
             Spacer(minLength: 0)
             Button { toMain(seg.id) } label: {
@@ -300,8 +333,16 @@ struct TimelineView: View {
                     }
                     .scrollDisabled(draggingId != nil || trimming != nil)
                     .coordinateSpace(name: timelineSpace)
-                    // Only track the resting offset (ignore the manual offset's own preference churn).
-                    .onPreferenceChange(ScrollOffsetKey.self) { y in if draggingId == nil { contentMinY = y } }
+                    // Scroll offset → `contentMinY` (blockStack top in viewport space: ≈6 at the top, negative
+                    // as you scroll down). iOS 18+ uses the reliable `onScrollGeometryChange`; a GeometryReader
+                    // inside ScrollView content reports 0 regardless of scroll on iOS 26 (that was the bug).
+                    .modifier(ScrollOffsetReader(topPadding: 6, isDragging: draggingId != nil) { y in
+                        contentMinY = y
+                    })
+                    // iOS 17 fallback only — the in-content GeometryReader measurement (above).
+                    .onPreferenceChange(ScrollOffsetKey.self) { y in
+                        if draggingId == nil, #unavailable(iOS 18.0) { contentMinY = y }
+                    }
                     .background(GeometryReader { g in
                         Color.clear
                             .onAppear { viewportHeight = g.size.height; scrollProxy = proxy }
@@ -339,10 +380,19 @@ struct TimelineView: View {
 
     private var blockStack: some View {
         let order = store?.order ?? []
-        let pTops = tops(previewOrder)
+        // Headers + tops reflow with the live drop preview while a clip is lifted.
+        let lay = layout(previewOrder)
         return ZStack(alignment: .top) {
+            ForEach(lay.headers) { h in
+                SectionHeaderRow(label: h.label, count: h.count)
+                    .frame(height: sectionHeaderHeight)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .offset(y: h.y)
+                    .animation(.spring(response: 0.32, dampingFraction: 0.82), value: h.y)
+                    .allowsHitTesting(false)
+            }
             ForEach(order) { clip in
-                blockRow(clip, pTops: pTops)
+                blockRow(clip, pTops: lay.tops)
             }
         }
         .frame(height: contentHeight, alignment: .top)
@@ -366,7 +416,6 @@ struct TimelineView: View {
                 isHook: store.hookId == clip.sourceSegmentId,
                 isTrimming: trimming?.id == clip.id,
                 isDragging: dragging,
-                canMakeBroll: store.hookId != clip.sourceSegmentId,
                 thumbnail: thumbs[clip.sourceSegmentId],
                 onTapSeek: { seekPreview(to: clip.id) },
                 onCut: { cut(clip.sourceSegmentId) },
@@ -409,29 +458,67 @@ struct TimelineView: View {
     /// Block height encodes duration, but never shorter than its content needs (a voiceover block
     /// carries an extra "Swap b-roll" row), so content can't overflow onto the next block.
     private func blockHeight(_ clip: Clip) -> CGFloat {
-        // Non-hook blocks carry a "Make B-roll" row, so they need a little more floor.
-        let floor: CGFloat = (store?.hookId == clip.sourceSegmentId) ? 96 : 112
+        // Every block carries a "Make B-roll" row (the hook can become B-roll too), so they all need
+        // the same floor to fit it.
+        let floor: CGFloat = 112
         return max(floor, min(210, CGFloat(clip.sourceDuration) * pps))
     }
 
-    /// Cumulative top offsets for a given order.
-    private func tops(_ order: [Clip]) -> [UUID: CGFloat] {
-        var result: [UUID: CGFloat] = [:]
-        var y: CGFloat = 0
-        for clip in order {
-            result[clip.id] = y
-            y += blockHeight(clip) + gap
-        }
-        return result
+    /// A section-header placement in content space (keyed by the first clip of its run for a stable
+    /// SwiftUI identity, so it animates with reflow rather than re-inserting).
+    private struct SectionHeaderPlacement: Identifiable {
+        let id: UUID        // first clip's id
+        let label: String
+        let count: Int
+        let y: CGFloat
     }
+    /// One layout pass over an order: per-clip top offsets, the section-header rows, and total height.
+    private struct TimelineLayout {
+        var tops: [UUID: CGFloat] = [:]
+        var headers: [SectionHeaderPlacement] = []
+        var total: CGFloat = 0
+    }
+
+    /// Single source of all y-positions: walks `order`, inserting a header row before the first clip
+    /// of each new `topic` section (so the spine reads section-by-section). Every geometry consumer
+    /// (`tops`, `contentHeight`, the drag insertion, auto-scroll) goes through this, so the header
+    /// offsets stay consistent and the reorder math needs no special-casing. With no topics present it
+    /// emits no headers — identical to the pre-feature layout.
+    private func layout(_ order: [Clip]) -> TimelineLayout {
+        var out = TimelineLayout()
+        var y: CGFloat = 0
+        var prevKey: String? = nil
+        var i = 0
+        while i < order.count {
+            let clip = order[i]
+            let seg = store?.segment(clip.sourceSegmentId)
+            let k = TopicGrouping.key(seg?.topic ?? "")
+            if let k, k != prevKey {
+                // Count this section's contiguous run (for the header's clip count).
+                var n = 0, j = i
+                while j < order.count,
+                      TopicGrouping.key(store?.segment(order[j].sourceSegmentId)?.topic ?? "") == k {
+                    n += 1; j += 1
+                }
+                out.headers.append(SectionHeaderPlacement(
+                    id: clip.id, label: seg.map(TopicGrouping.sectionLabel) ?? "", count: n, y: y))
+                y += sectionHeaderHeight + sectionHeaderGap
+            }
+            out.tops[clip.id] = y
+            y += blockHeight(clip) + gap
+            if k != nil { prevKey = k }
+            i += 1
+        }
+        out.total = max(0, y - gap)
+        return out
+    }
+
+    /// Cumulative top offsets for a given order (header rows included — see `layout`).
+    private func tops(_ order: [Clip]) -> [UUID: CGFloat] { layout(order).tops }
 
     private func staticTop(_ cid: UUID) -> CGFloat { tops(store?.order ?? [])[cid] ?? 0 }
 
-    private var contentHeight: CGFloat {
-        let clips = store?.order ?? []
-        let h = clips.reduce(CGFloat(0)) { $0 + blockHeight($1) }
-        return h + CGFloat(max(0, clips.count - 1)) * gap
-    }
+    private var contentHeight: CGFloat { layout(store?.order ?? []).total }
 
     /// The order to render while a block is mid-drag (dragged clip moved to its drop slot).
     private var previewOrder: [Clip] {
@@ -475,7 +562,7 @@ struct TimelineView: View {
                 dragRawTranslation = drag?.translation.height ?? 0
                 dragTranslation = dragRawTranslation + autoPanY
                 updateInsertion()
-                driveAutoScroll(fingerY: drag?.location.y ?? 0)
+                driveAutoScroll(fingerY: draggedViewportCenter())
             }
             .onEnded { _ in
                 autoScroller.stop()
@@ -511,24 +598,41 @@ struct TimelineView: View {
     private func driveAutoScroll(fingerY: CGFloat) {
         // dragScrollY range: how far the content can move up (toward the top) / down (toward the bottom)
         // from the resting offset captured at lift, without exposing blank space past either end.
-        let minPan = contentMinYAtLift - 6                                          // top rest ≈ 6pt padding
-        let maxPan = contentMinYAtLift - (viewportHeight - contentHeight - 24)       // bottom (24pt padding)
+        let restMin = contentMinYAtLift - 6                                          // top rest ≈ 6pt padding
+        let restMax = contentMinYAtLift - (viewportHeight - contentHeight - 24)       // bottom (24pt padding)
+        // Over-pan past the natural top/bottom rest while lifted, so the dragged clip's center can cross the
+        // first/last clip's center even when the finger is pinned inside the edge band (the cause of the old
+        // "can't drag a clip all the way up" bug). Mirrors PolishView's centered-playhead headroom, but only
+        // during a lift (resting layout stays tight) and only when the list overflows (short lists need no
+        // scroll, so 0 headroom keeps them from drifting). Headroom covers the edge band (64) plus the dragged
+        // block's own half-height, so even a tall (up to 210pt) first/last clip's center can be pushed across.
+        let draggedHalf = draggingId.flatMap { id in store?.order.first { $0.id == id } }
+            .map { blockHeight($0) / 2 } ?? 56
+        let headroom: CGFloat = contentHeight > viewportHeight ? 64 + draggedHalf : 0
+        let minPan = restMin - headroom
+        let maxPan = restMax + headroom
         let dy = dragRawTranslation
+        let lastIndex = max(0, (store?.order.count ?? 0) - 1)
+        let canUp = dragScrollY > minPan && dy < -8 && (dropInsertion ?? 1) > 0
+        let canDown = dragScrollY < maxPan && dy > 8 && (dropInsertion ?? -1) < lastIndex
         autoScroller.onTick = { delta in
             guard maxPan > minPan else { return }
             dragScrollY = max(minPan, min(dragScrollY + delta, maxPan))
             applyAutoPan(dragScrollY)
         }
+        // Stop pulling once the live drop index is already at an end, so it won't scroll into blank.
         autoScroller.update(location: fingerY, viewportLength: viewportHeight,
-                            canScrollStart: dragScrollY > minPan && dy < -8,
-                            canScrollEnd: dragScrollY < maxPan && dy > 8)
+                            canScrollStart: canUp, canScrollEnd: canDown)
     }
 
     private func updateInsertion() {
+        // Plain assignment — NOT withAnimation. This runs from the auto-scroll CADisplayLink tick (via
+        // applyAutoPan), and calling withAnimation from a display-link callback bases the animation on the
+        // link's timestamp, colliding with SwiftUI's clock ("Invalid sample … time 0.0 > last time" spam).
+        // The reflow still springs: the blocks (`.animation(value: top)`) and section headers
+        // (`.animation(value: h.y)`) animate the change themselves in SwiftUI's normal update cycle.
         let ins = computeInsertion(draggedCenter: currentDraggedCenter())
-        if ins != dropInsertion {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) { dropInsertion = ins }
-        }
+        if ins != dropInsertion { dropInsertion = ins }
     }
 
     /// The dragged block's center in content space (static slot + finger movement + auto-scroll).
@@ -536,6 +640,18 @@ struct TimelineView: View {
         guard let store, let dragId = draggingId,
               let dragClip = store.order.first(where: { $0.id == dragId }) else { return 0 }
         return staticTop(dragId) + blockHeight(dragClip) / 2 + dragTranslation
+    }
+
+    /// The dragged block's center in the FIXED viewport, for edge-band auto-scroll detection. Derived from
+    /// the resting content offset captured at lift + the finger delta — NOT from `drag.location`, whose y in
+    /// a ScrollView-named coordinate space is content-relative (it grows as you scroll down), which made the
+    /// top edge band unreachable so the timeline never auto-scrolled UP. The block's own `+dragScrollY`
+    /// offset cancels the content's `-dragScrollY` offset, so this is independent of how far we've
+    /// auto-scrolled — keeping the detection point stable in the viewport while the finger is held.
+    private func draggedViewportCenter() -> CGFloat {
+        guard let store, let dragId = draggingId,
+              let dragClip = store.order.first(where: { $0.id == dragId }) else { return 0 }
+        return contentMinYAtLift + staticTop(dragId) + blockHeight(dragClip) / 2 + dragRawTranslation
     }
 
     /// Called continuously while the bottom handle is dragged (translation in points).
@@ -634,7 +750,6 @@ private struct TimelineBlockView: View {
     let isHook: Bool
     let isTrimming: Bool
     let isDragging: Bool
-    let canMakeBroll: Bool           // false for the hook (it always stays on the main spine)
     let thumbnail: UIImage?
     let onTapSeek: () -> Void
     let onCut: () -> Void
@@ -665,7 +780,7 @@ private struct TimelineBlockView: View {
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
                 }
-                if canMakeBroll { makeBrollRow }
+                makeBrollRow
                 Spacer(minLength: 0)
             }
             .frame(maxHeight: .infinity, alignment: .top)
