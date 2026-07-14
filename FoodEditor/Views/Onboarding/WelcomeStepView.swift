@@ -30,7 +30,7 @@ struct WelcomeStepView: View {
                 .minimumScaleFactor(0.85)
                 .fixedSize(horizontal: false, vertical: true)
 
-                Text("Vela watches how you actually edit — your hooks, your cuts, your voice — and learns to do it for you.")
+                Text("Vela watches how you actually edit — your hooks, your cuts, your voice — and learns to do it for you. Or skip straight to your first cut — raw clips in, a TikTok-ready edit out.")
                     .font(VeFont.sans(15))
                     .foregroundStyle(Color.veOnTerracotta.opacity(0.85))
                     .lineSpacing(3)

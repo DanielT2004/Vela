@@ -377,15 +377,15 @@ async function notifyJobFinished(jobId: string, success: boolean): Promise<void>
     if (success) {
       await sendApnsPush(
         push.device_token,
-        isStyle ? "Your style is ready ✨" : "Your cut is ready 🍴",
-        isStyle ? "Tap to review your template." : "Tap to see your results.",
+        isStyle ? "Your style is ready ✨" : "Your first cut is ready 🍴",
+        isStyle ? "Tap to review your template." : "Tap to watch it.",
         env,
         { screen: isStyle ? "template" : "analysis", jobId },
       );
     } else {
       await sendApnsPush(
         push.device_token,
-        isStyle ? "Style analysis hit a snag" : "Analysis hit a snag",
+        isStyle ? "Style analysis hit a snag" : "Your cut hit a snag",
         "Open Vela to try again.",
         env,
         { screen: isStyle ? "template" : "analysis", jobId },

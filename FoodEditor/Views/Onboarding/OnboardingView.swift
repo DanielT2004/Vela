@@ -23,7 +23,7 @@ struct OnboardingView: View {
                 case 1:
                     SignUpStepView { goTo(2) }
                 case 2:
-                    ConnectStepView(onBack: { goTo(1) }, onContinue: { goTo(3) })
+                    ConnectStepView(onBack: { goTo(1) }, onContinue: { goTo(3) }, onSkip: { skipAndEnter() })
                 case 3:
                     AnalyzingStepView(
                         coordinator: styleCoordinator,
@@ -73,6 +73,15 @@ struct OnboardingView: View {
             templates.save(t, poster: styleCoordinator.posterImage)   // first template auto-becomes active
         }
         StyleJobStore.clear()   // template is now durable — safe to drop the kill-recovery record
+        auth.hasOnboarded = true
+        router.home()
+    }
+
+    /// Skip the style-learn at the Connect door. Defensive `startFresh()`: Connect ingests picks into
+    /// the SHARED VideoSession, so a skip after any pick must not leak onboarding clips into the
+    /// Kitchen → Picker flow. The learn path itself stays byte-identical.
+    private func skipAndEnter() {
+        session.startFresh()
         auth.hasOnboarded = true
         router.home()
     }

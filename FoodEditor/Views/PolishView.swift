@@ -734,11 +734,30 @@ struct PolishView: View {
         .overlay { if selected { RoundedRectangle(cornerRadius: 7, style: .continuous).stroke(Color.veTerracotta.opacity(0.18), lineWidth: 3).padding(-2.5) } }
         .overlay(alignment: .leading) { if selected { trimHandle(sel: .base(clip.id), leftEdge: true, factor: clip.clampedSpeed, left: clip.inPoint, right: clip.outPoint, height: mainH) } }
         .overlay(alignment: .trailing) { if selected { trimHandle(sel: .base(clip.id), leftEdge: false, factor: clip.clampedSpeed, left: clip.inPoint, right: clip.outPoint, height: mainH) } }
+        .overlay(alignment: .topTrailing) { if !selected && clipIsTrimmed(clip) { trimmedBadge } }
         .contentShape(Rectangle())
         .onTapGesture { select(.base(clip.id)) }
         .opacity(dim(forBase: clip.id))
         .shadow(color: Color.veCharcoal.opacity(isLifted(.base(clip.id)) ? 0.3 : 0), radius: isLifted(.base(clip.id)) ? 10 : 0, y: 5)
         .simultaneousGesture(liftGesture(.base(clip.id), baseStart: baseStart(clip)))
+    }
+
+    /// ✂️ breadcrumb: this spine clip plays LESS than its full source segment (an AI trim or a Sort
+    /// choice) — there's hidden footage recoverable by selecting the tile and dragging its trim
+    /// handles outward. Hidden while selected so it never sits on top of the handles.
+    private func clipIsTrimmed(_ clip: Clip) -> Bool {
+        guard let s = store?.segment(clip.sourceSegmentId) else { return false }
+        return clip.inPoint > s.startSeconds + 0.05 || clip.outPoint < s.endSeconds - 0.05
+    }
+
+    private var trimmedBadge: some View {
+        Image(systemName: "scissors")
+            .font(.system(size: 6.5, weight: .bold))
+            .foregroundStyle(.white.opacity(0.9))
+            .frame(width: 13, height: 13)
+            .background(Color.veCharcoal.opacity(0.55), in: Circle())
+            .padding(2)
+            .allowsHitTesting(false)
     }
 
     private func brollChip(_ o: OverlayClip) -> some View {

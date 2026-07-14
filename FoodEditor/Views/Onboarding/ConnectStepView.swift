@@ -9,6 +9,9 @@ struct ConnectStepView: View {
 
     let onBack: () -> Void
     let onContinue: () -> Void
+    /// The front door must never be a toll booth: a raw-footage-only first-timer skips the style-learn
+    /// entirely and lands in the Kitchen (the learn is re-offered on Home + after the first export).
+    let onSkip: () -> Void
 
     @State private var showPicker = false
     @State private var downloadProgress: Progress?     // non-nil while a picked video copies out of the library
@@ -78,6 +81,16 @@ struct ConnectStepView: View {
                     .padding(.vertical, 16)
                     .background(Color(hex: 0xE2DACB), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
+
+            // Visible in BOTH CTA states — even mid-pick the user can bail to raw-clip cutting.
+            Button(action: onSkip) {
+                Text("No posted videos yet? **Skip** — start cutting, teach Vela later")
+                    .font(VeFont.sans(12.5))
+                    .foregroundStyle(Color.veNoteText)
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 14)
         }
         .padding(.horizontal, 26)
         .padding(.top, 60)

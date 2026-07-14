@@ -61,7 +61,7 @@ struct ProcessingView: View {
             Button("Stop the edit", role: .destructive) { cancelAnalysis() }
             Button("Keep working", role: .cancel) {}
         } message: {
-            Text("Your clips and brief stay put — you can send it again anytime.")
+            Text("Your clips and answers stay put — you can send it again anytime.")
         }
         // Idempotent — safe to fire on every (re)mount; the coordinator runs the pipeline at most once
         // per submitted clip set and survives this view disappearing. The active style (if any) is injected.
@@ -212,8 +212,8 @@ struct ProcessingView: View {
         switch analysis.stage {
         case .preparing: return "Prepping your footage"
         case .uploading: return "Uploading your footage"
-        case .analyzing:  return "Analyzing your footage"
-        case .finishing:  return "Putting it together"
+        case .analyzing:  return "Watching your footage"
+        case .finishing:  return "Making the first cut"
         }
     }
 
@@ -231,133 +231,6 @@ struct ProcessingView: View {
         if s < 60 { return "About \(s)s left" }
         let m = Int((Double(s) / 60).rounded())
         return "About \(m) min left"
-    }
-
-    // MARK: done (M4 — decoded summary + raw JSON)
-    // NOTE: superseded by `FirstCutView` (+ its reveal curtain) as the post-analysis screen (we route to
-    // `.segments` on `.done`). Kept (currently unreached) as the raw-JSON inspection aid; safe to delete.
-
-    private func doneState(_ plan: EditPlan, _ raw: String) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            // Top bar so the user is never stuck here (this is pre-editor, so NO stage nav bar):
-            // Cancel (left) steps back to the picker, Home (right, mockup style) exits to the Kitchen.
-            HStack {
-                Button("Cancel") { router.back() }
-                    .font(VeFont.sans(13, weight: .semibold))
-                    .foregroundStyle(Color.veWarmGray)
-                Spacer()
-                HomeButton { router.home() }
-            }
-            .padding(.top, 54)
-            .padding(.horizontal, 22)
-
-            HStack(spacing: 10) {
-                Image(systemName: "checkmark.seal.fill")
-                    .font(.system(size: 24)).foregroundStyle(Color.veSage)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Analysis ready")
-                        .font(VeFont.serif(22)).foregroundStyle(Color.veCharcoal)
-                    if let m = session.merged {
-                        Text("\(session.clips.count) clips → 1 video · \(m.metadata.fileSizeText) · \(m.metadata.resolutionText)")
-                            .font(VeFont.sans(12)).foregroundStyle(Color.veWarmGray)
-                    }
-                }
-                Spacer()
-            }
-            .padding(.top, 4)
-            .padding(.horizontal, 22)
-
-            summaryCard(plan).padding(.horizontal, 22)
-
-            DisclosureGroup {
-                ScrollView {
-                    Text(raw)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(Color.veCharcoal)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(12)
-                }
-                .frame(maxHeight: 240)
-                .background(Color.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            } label: {
-                Text("Raw JSON (\(raw.count) chars)")
-                    .font(VeFont.sans(13, weight: .bold))
-                    .foregroundStyle(Color.veWarmGray)
-            }
-            .tint(Color.veTerracotta)
-            .padding(.horizontal, 22)
-
-            Spacer(minLength: 0)
-
-            PrimaryActionButton(title: "See the breakdown") { router.go(.segments) }
-                .padding(.horizontal, 22)
-                .padding(.bottom, 28)
-        }
-    }
-
-    private func summaryCard(_ plan: EditPlan) -> some View {
-        let kept = plan.segments.filter { $0.keep }.count
-        let vo = plan.segments.filter { $0.voiceoverCandidate }.count
-        let lowConf = plan.segments.filter { $0.isLowConfidence }.count
-        return VStack(alignment: .leading, spacing: 12) {
-            if !plan.videoSummary.isEmpty {
-                Text("“\(plan.videoSummary)”")
-                    .font(VeFont.serif(16, italic: true))
-                    .foregroundStyle(Color(hex: 0x4A453E))
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            HStack(spacing: 8) {
-                statPill("\(plan.segments.count)", "segments")
-                statPill("\(kept)", "keep")
-                statPill("\(vo)", "voiceover")
-                if lowConf > 0 { statPill("\(lowConf)", "to review") }
-            }
-            if !plan.recommendedHook.isEmpty {
-                metaLine("Hook", plan.recommendedHook)
-            }
-            metaLine("Suggested length", "\(Int(plan.recommendedDuration))s")
-            if let notes = plan.styleMatchNotes,
-               !notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("WHAT WE DID WITH YOUR BRIEF")
-                        .font(VeFont.sans(10, weight: .bold)).tracking(0.4)
-                        .foregroundStyle(Color.veFaintGray)
-                    Text(notes)
-                        .font(VeFont.serif(14, italic: true))
-                        .foregroundStyle(Color.veNoteText)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(12)
-                .background(Color.veNote, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .padding(.top, 2)
-            }
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .shadow(color: Color.veCharcoal.opacity(0.05), radius: 8, y: 2)
-    }
-
-    private func statPill(_ value: String, _ label: String) -> some View {
-        VStack(spacing: 1) {
-            Text(value).font(VeFont.sans(18, weight: .bold)).foregroundStyle(Color.veTerracotta)
-            Text(label).font(VeFont.sans(10.5)).foregroundStyle(Color.veWarmGray)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 8)
-        .background(Color.veNote, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-    }
-
-    private func metaLine(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label.uppercased())
-                .font(VeFont.sans(10, weight: .bold)).tracking(0.4)
-                .foregroundStyle(Color.veFaintGray)
-            Text(value).font(VeFont.sans(13)).foregroundStyle(Color.veCharcoal)
-                .fixedSize(horizontal: false, vertical: true)
-        }
     }
 
     // MARK: error

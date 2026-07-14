@@ -271,7 +271,7 @@ final class AnalysisCoordinator {
             // viability) never reached the server and always ping locally. Mirrors the style coordinator.
             let serverPushedFailure: Bool = { if let ge = error as? GeminiError, case .badRequest = ge { return true }; return false }()
             if !serverPushedFailure || NotificationService.shared.deviceTokenHex == nil {
-                NotificationService.shared.notify(title: "Analysis hit a snag", body: message, screen: "analysis")
+                NotificationService.shared.notify(title: "Your cut hit a snag", body: message, screen: "analysis")
             }
         }
     }
@@ -334,10 +334,19 @@ final class AnalysisCoordinator {
         if !snapActions.isEmpty {
             Log.gemini("Word-snap (\(snapActions.count)) — " + snapActions.joined(separator: " · "))
         }
-        let (plan, repairActions) = EditPlanRepair.repairBroll(snappedPlan)
+        let (repairedPlan, brollActions) = EditPlanRepair.repairBroll(snappedPlan)
+        // …then fill any coverage holes so EVERY second of the proxy reaches the Sort deck — footage the
+        // model skipped becomes explicit "watch it and decide" cards instead of silently vanishing.
+        let (plan, coverageActions) = EditPlanRepair.fillCoverageGaps(repairedPlan, proxyDuration: processed.metadata.duration)
+        let repairActions = brollActions + coverageActions
         let validation = EditPlanValidator.validate(plan, proxyDuration: processed.metadata.duration)
+        if !brollActions.isEmpty {
+            Log.gemini("B-roll repair (\(brollActions.count)) — " + brollActions.joined(separator: " · "))
+        }
+        if !coverageActions.isEmpty {
+            Log.gemini("Coverage repair (\(coverageActions.count)) — " + coverageActions.joined(separator: " · "))
+        }
         if !repairActions.isEmpty {
-            Log.gemini("B-roll repair (\(repairActions.count)) — " + repairActions.joined(separator: " · "))
             Log.gemini("Plan validation (shipped, after repair) — \(validation.summary)")
         }
         if let bundle {
@@ -370,8 +379,8 @@ final class AnalysisCoordinator {
         // `phase == .done` routes them to the reveal).
         if !serverNotifies, !resumed {
             NotificationService.shared.notify(
-                title: "Your cut is ready 🍴",
-                body: "\(plan.segments.count) moments found · ~\(Int(plan.recommendedDuration))s suggested. Tap to refine.",
+                title: "Your first cut is ready 🍴",
+                body: "~\(Int(plan.recommendedDuration))s, cut from \(plan.segments.count) moments. Tap to watch it.",
                 screen: "analysis"
             )
         }
@@ -507,7 +516,7 @@ final class AnalysisCoordinator {
             // Same two-condition gate as the live pipeline (KNOWN_ISSUES #9).
             let serverPushedFailure: Bool = { if let ge = error as? GeminiError, case .badRequest = ge { return true }; return false }()
             if !serverPushedFailure || NotificationService.shared.deviceTokenHex == nil {
-                NotificationService.shared.notify(title: "Analysis hit a snag", body: error.localizedDescription, screen: "analysis")
+                NotificationService.shared.notify(title: "Your cut hit a snag", body: error.localizedDescription, screen: "analysis")
             }
         }
     }

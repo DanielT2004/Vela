@@ -17,8 +17,14 @@ struct EditorShellView: View {
     /// Presented when the user taps Sort after they've already moved past it (frame 3).
     @State private var showResumeSheet = false
 
+    /// "The Read" from anywhere in the editor — the same BreakdownSheet as the Cut Card's lip and the
+    /// deck's done-card, so analytics is reachable without ever being a page.
+    @State private var showRead = false
+
     /// Inline rename state for the header title (mirrors ProfileView's serif field + ✓ flash).
+    /// `editingTitle` swaps the truncating display Text for the editable field (see `header`).
     @State private var titleDraft = ""
+    @State private var editingTitle = false
     @FocusState private var titleFocused: Bool
     @State private var savedFlash = false
 
@@ -37,6 +43,15 @@ struct EditorShellView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.veCream.ignoresSafeArea())
+        .sheet(isPresented: $showRead) {
+            if let store {
+                BreakdownSheet(store: store,
+                               read: RetentionRead(plan: store.plan, store: store),
+                               thumbs: [:], proxyURL: session.merged?.url)   // sheet self-loads its thumbs
+                    .presentationDetents([.fraction(0.55), .large])
+                    .presentationDragIndicator(.visible)
+            }
+        }
         .sheet(isPresented: $showResumeSheet) {
             ResumeSortSheet(
                 onContinue: { showResumeSheet = false; goToSort() },
@@ -56,40 +71,74 @@ struct EditorShellView: View {
             Spacer()
             // Tap-to-rename title — the persisted project name (single source of truth), so this and the
             // Home tile stay in sync. Commits on Done and on focus-loss; a ✓ flashes on save.
+            // At rest it's a TRUNCATING one-line Text ("A food reviewer visi…"), so a long name can
+            // never spill over the Home button or squeeze Read/Export into mid-word wraps — the title
+            // is the row's only compressible element; tapping it swaps in the editable field.
             HStack(spacing: 5) {
-                TextField("Your cut", text: $titleDraft)
-                    .font(VeFont.sans(14.5, weight: .semibold))
-                    .foregroundStyle(titleFocused ? Color.veCharcoal : Color.veWarmGray)
-                    .multilineTextAlignment(.center)
-                    .textInputAutocapitalization(.words)
-                    .autocorrectionDisabled()
-                    .submitLabel(.done)
-                    .focused($titleFocused)
-                    .onSubmit(commitTitle)
-                    .fixedSize()
+                if editingTitle {
+                    TextField("Your cut", text: $titleDraft)
+                        .font(VeFont.sans(14.5, weight: .semibold))
+                        .foregroundStyle(Color.veCharcoal)
+                        .multilineTextAlignment(.center)
+                        .textInputAutocapitalization(.words)
+                        .autocorrectionDisabled()
+                        .submitLabel(.done)
+                        .focused($titleFocused)
+                        .onSubmit(commitTitle)
+                        .onAppear { titleFocused = true }
+                } else {
+                    Text(titleDraft.isEmpty ? "Your cut" : titleDraft)
+                        .font(VeFont.sans(14.5, weight: .semibold))
+                        .foregroundStyle(Color.veWarmGray)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
                 if savedFlash {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 13)).foregroundStyle(Color.veSage)
                         .transition(.scale(scale: 0.4).combined(with: .opacity))
-                } else if !titleFocused {
+                } else if !editingTitle {
                     Image(systemName: "pencil")
                         .font(.system(size: 10, weight: .semibold)).foregroundStyle(Color.veFaintGray)
                 }
             }
-            .frame(maxWidth: 190)
+            .frame(maxWidth: 150)
+            .contentShape(Rectangle())
+            .onTapGesture { if !editingTitle { editingTitle = true } }
             Spacer()
+            Button {
+                guard !showResumeSheet else { return }   // never co-present with the resume sheet
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                showRead = true
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "chart.bar.xaxis")
+                        .font(.system(size: 11, weight: .semibold))
+                    // "Analysis", not "Analytics" — the sheet is Vela's read of the FOOTAGE, never
+                    // platform performance metrics (the Retention Map's no-fake-metrics rule).
+                    Text("Analysis").font(VeFont.sans(12, weight: .bold))
+                }
+                .foregroundStyle(Color.veNoteText)
+                .frame(height: 34).padding(.horizontal, 11)
+                .background(Color.veSurface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .fixedSize()   // never compress into a mid-word wrap — the title truncates instead
+            }
+            .buttonStyle(.plain)
             Button { router.go(.export) } label: {
                 Text("Export")
                     .font(VeFont.sans(12.5, weight: .bold)).foregroundStyle(Color.veOnTerracotta)
                     .frame(height: 34).padding(.horizontal, 15)
                     .background(Color.veTerracotta, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .fixedSize()   // never compress into a mid-word wrap — the title truncates instead
             }
             .buttonStyle(.plain)
         }
         .padding(.horizontal, 18)
         .padding(.top, 54)
         .onAppear { titleDraft = projects.name }
-        .onChange(of: titleFocused) { _, focused in if !focused { commitTitle() } }
+        .onChange(of: titleFocused) { _, focused in
+            if !focused { commitTitle(); editingTitle = false }
+        }
         .animation(.spring(response: 0.35, dampingFraction: 0.7), value: savedFlash)
     }
 

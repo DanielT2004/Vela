@@ -1,11 +1,20 @@
 import SwiftUI
 import UIKit
 
-/// The required per-video brief — "Before we cut · Anything special for this one?". Gated between the
+/// The per-video brief — "Before we cut · Anything special for this one?". Gated between the
 /// picker and processing so the creator confirms what THIS video needs before the slow, paid analysis.
-/// Pre-filled from the active `StyleTemplate`; on submit it writes an `EditBrief` to the session, which
-/// `ProcessingView` turns into the prepended brief prompt block. Every field maps to a real `editPlan`
-/// lever — see `EditBrief`. Design shell: the shared `briefBindings` screen in Food Editor (onboarding).dc.html.
+///
+/// **Radically collapsed by design (2026-07-14 beta simplicity pass; target user = casual creator, not
+/// pros).** Four plain questions, no fold: TARGET LENGTH and the voiceover intent (the two with no safe
+/// default — voiceover is genuinely bimodal, narration-led vs talking-led cut very differently), the
+/// screen-time lean while talking (defaulted, one dynamic explainer line), and the free-text note — the
+/// universal "off-vibes" escape valve (`BriefPromptBuilder` honors anything typed there, including
+/// specific hook ideas). Everything else was REMOVED from the UI outright: opener chips, keep-beats
+/// chips, and the trim toggle (the note covers the first two better; trim is just always-on now via
+/// `EditBrief.trimSlowParts` default `true`). An untouched screen submits the same `EditBrief()`
+/// defaults, so the prompt block is byte-identical to before (a template-prefilled `hookSequence` stays
+/// inert while `maxScrollStopHook` is true, and nothing in the UI can flip it; see
+/// [BriefPromptBuilder](FoodEditor/Services/BriefPromptBuilder.swift)). Zero model/prompt changes.
 struct BriefView: View {
     @Environment(AppRouter.self) private var router
     @Environment(VideoSession.self) private var session
@@ -20,14 +29,12 @@ struct BriefView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     header
-                    templateCard.padding(.top, 20)
+                    if templates.active != nil { templateRow.padding(.top, 20) }
                     footageSection.padding(.top, 22)
                     lengthSection.padding(.top, 24)
-                    section("How it opens") { hookSection }
-                    section("Me on camera vs. b-roll") { leanSection }
-                    section("Make sure to keep") { keepBeatsChips }
-                    section("Trim the slow stuff") { trimToggle }
-                    section("Anything specific?") { noteField }
+                    voiceoverPlanToggle.padding(.top, 10)
+                    section("While you're talking") { leanSection }
+                    section("Anything specific? (optional)") { noteField }
                 }
                 .padding(.horizontal, 22)
                 .padding(.top, 52)
@@ -57,32 +64,37 @@ struct BriefView: View {
                 .font(VeFont.serif(29))
                 .foregroundStyle(Color.veCharcoal)
                 .padding(.top, 6)
-            Text("Set the brief for this video. We've pre-filled it from your style — tune each step, then send it to edit.")
+            Text(templates.active == nil
+                 ? "We've set good defaults — just check the length."
+                 : "Everything's set to your usual style. Change what matters for this one — or just send it.")
                 .font(VeFont.sans(13.5))
                 .foregroundStyle(Color.veWarmGray)
                 .lineSpacing(2)
                 .padding(.top, 7)
+            Text("\(session.clips.count) clip\(session.clips.count == 1 ? "" : "s") · \(session.totalDurationText)")
+                .font(VeFont.sans(12))
+                .foregroundStyle(Color.veFaintGray)
+                .padding(.top, 4)
         }
     }
 
-    // MARK: template card (dark)
+    // MARK: template row (compact; hidden entirely when no template — no "empty style" advertising)
 
-    private var templateCard: some View {
+    private var templateRow: some View {
         let dark = Color(hex: 0x1C1A18)
         let ochre = Color(hex: 0xE8B65E)
         return VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 13) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12).fill(ochre.opacity(0.16)).frame(width: 42, height: 42)
-                    Image(systemName: "square.grid.2x2")
-                        .font(.system(size: 18, weight: .semibold)).foregroundStyle(ochre)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(templates.active == nil ? "NO SAVED STYLE YET" : "EDITING WITH TEMPLATE")
-                        .font(VeFont.sans(11, weight: .bold)).tracking(0.6)
+            HStack(spacing: 11) {
+                Image(systemName: "square.grid.2x2")
+                    .font(.system(size: 14, weight: .semibold)).foregroundStyle(ochre)
+                    .frame(width: 32, height: 32)
+                    .background(ochre.opacity(0.16), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("CUTTING IN YOUR STYLE")
+                        .font(VeFont.sans(10, weight: .bold)).tracking(0.6)
                         .foregroundStyle(ochre)
-                    Text(templates.active?.name ?? "Smart defaults")
-                        .font(VeFont.sans(16.5, weight: .bold))
+                    Text(templates.active?.name ?? "")
+                        .font(VeFont.sans(15, weight: .bold))
                         .foregroundStyle(Color.veCream)
                 }
                 Spacer(minLength: 6)
@@ -105,12 +117,12 @@ struct BriefView: View {
                         templateOption(t, ochre: ochre)
                     }
                 }
-                .padding(.top, 14)
+                .padding(.top, 12)
             }
         }
-        .padding(16)
+        .padding(13)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(dark, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(dark, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     private func templateOption(_ t: StyleTemplate, ochre: Color) -> some View {
@@ -137,7 +149,7 @@ struct BriefView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: footage
+    // MARK: footage (KEPT — the last visual confirmation before the paid, slow analysis)
 
     private var footageSection: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -172,13 +184,13 @@ struct BriefView: View {
         }
     }
 
-    // MARK: target length
+    // MARK: target length (the ONE decision on the visible path)
 
     private var lengthSection: some View {
         let binding = Binding(get: { Double(brief.lengthSeconds) },
                               set: { brief.lengthSeconds = Int($0) })
         return VStack(alignment: .leading, spacing: 10) {
-            Text("TARGET LENGTH")
+            Text("HOW LONG?")
                 .font(VeFont.sans(12, weight: .bold)).tracking(0.5).foregroundStyle(Color.veWarmGray)
             VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .firstTextBaseline) {
@@ -197,9 +209,13 @@ struct BriefView: View {
                     Spacer(); lengthTag("In-depth", .indepth)
                 }
                 .padding(.top, 4)
-                Text("Tip: ~25–35s tends to perform best for food reviews.")
-                    .font(VeFont.sans(11)).foregroundStyle(Color.veFaintGray)
-                    .padding(.top, 10)
+                // Contextual, not constant: at the default you're already inside the recommended band —
+                // the tip earns its place only once the creator drags long.
+                if brief.lengthSeconds > 45 {
+                    Text("Most food videos land best around 25–35s.")
+                        .font(VeFont.sans(11)).foregroundStyle(Color.veFaintGray)
+                        .padding(.top, 10)
+                }
             }
             .padding(16)
             .background(Color.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -214,55 +230,41 @@ struct BriefView: View {
             .foregroundStyle(on ? Color.veTerracotta : Color.veFaintGray)
     }
 
-    // MARK: how it opens — ordered multi-select (back-to-back)
+    // MARK: note (promoted — the universal escape valve)
 
-    /// The active template's confirmed spoken hook line, if any — so the max-scroll-stop toggle is honest
-    /// about the one thing it may displace (mirrors `BriefPromptBuilder.confirmedHookLine`).
-    private var confirmedHookQuote: String? {
-        guard let t = templates.active else { return nil }
-        return t.profile.verbalStyle.recurringLines.first { l in
-            l.isSpoken && l.role == "hook"
-                && (l.confirmation == "every" || (t.count >= 2 && l.evidenceCount >= t.count))
-                && !l.quote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }?.quote
+    private var noteField: some View {
+        TextField("e.g. keep the part where I show the price",
+                  text: $brief.note, axis: .vertical)
+            .font(VeFont.sans(14))
+            .foregroundStyle(Color.veCharcoal)
+            .lineLimit(3...6)
+            .padding(14)
+            .background(Color.white, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.veCharcoal.opacity(0.12), lineWidth: 1.5))
     }
 
-    private var hookSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            // Opt-in: let the AI open on the single most arresting moment (more scroll-stopping; overrides the chips).
-            Toggle(isOn: Binding(get: { brief.maxScrollStopHook }, set: { brief.maxScrollStopHook = $0 })) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Max scroll-stop").font(VeFont.sans(14, weight: .semibold)).foregroundStyle(Color.veCharcoal)
-                    Text("Let the AI open on your single most attention-grabbing moment.")
-                        .font(VeFont.sans(12)).foregroundStyle(Color.veWarmGray)
-                }
-            }
-            .tint(Color.veTerracotta)
+    // MARK: while you're talking (screen-time lean over talking segments)
 
-            BriefFlowLayout(spacing: 8, lineSpacing: 8) {
-                ForEach(HookShot.allCases, id: \.self) { shot in
-                    BriefHookChip(label: shot.label, order: hookOrder(shot)) { toggleHook(shot) }
-                }
-            }
-            .opacity(brief.maxScrollStopHook ? 0.35 : 1)
-            .disabled(brief.maxScrollStopHook)
-
-            Text(brief.maxScrollStopHook
-                 ? (confirmedHookQuote.map { "May open on something punchier than your usual “\($0)” — your line still makes the cut, just after the opener." }
-                    ?? "The AI opens on the most scroll-stopping moment, then teases the payoff.")
-                 : (brief.hookSequence.isEmpty
-                    ? "Leave empty to let the AI pick the strongest opener."
-                    : "Plays back-to-back in this order."))
-                .font(VeFont.sans(12)).foregroundStyle(Color.veFaintGray)
+    /// The grid + a dynamic explainer (the length card's band-message pattern). The load-bearing fact
+    /// it teaches: the creator's LIVE audio never changes — this only sets how much food b-roll plays
+    /// OVER the talking (Layer 2 silent overlays; talking clips stay on the spine with their sound).
+    private var leanSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            leanGrid
+            Text(leanMessage)
+                .font(VeFont.sans(12)).foregroundStyle(Color.veWarmGray)
+                .lineSpacing(1.5)
+                .fixedSize(horizontal: false, vertical: true)
+                .animation(.easeOut(duration: 0.15), value: brief.brollLean)
         }
     }
 
-    // MARK: me on camera vs. b-roll
-
-    private var leanSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            leanGrid
-            voiceoverPlanToggle
+    private var leanMessage: String {
+        switch brief.brollLean {
+        case .onCamera:   return "Your face carries it — food shots only where they really punch."
+        case .balanced:   return "You on camera for the big moments, food shots over the rest."
+        case .brollHeavy: return "You keep talking — the screen shows the food while your voice runs under it."
         }
     }
 
@@ -276,9 +278,9 @@ struct BriefView: View {
     private var voiceoverPlanToggle: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("I'll record a voiceover")
+                Text("I'll add a voiceover after")
                     .font(VeFont.sans(14, weight: .semibold)).foregroundStyle(Color.veCharcoal)
-                Text("You'll narrate over the finished edit in Vela — the cut will favor strong visuals.")
+                Text("We'll favor action shots over talking — you record over the finished cut, right in Vela.")
                     .font(VeFont.sans(12)).foregroundStyle(Color.veWarmGray)
             }
             Spacer(minLength: 8)
@@ -286,49 +288,7 @@ struct BriefView: View {
         }
         .padding(14)
         .background(Color.white, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-    }
-
-    // MARK: make sure to keep
-
-    private var keepBeatsChips: some View {
-        BriefFlowLayout(spacing: 8, lineSpacing: 8) {
-            ForEach(KeepBeat.allCases, id: \.self) { beat in
-                BriefChip(label: beat.label, selected: brief.keepBeats.contains(beat), accent: Color.veSage) {
-                    toggleKeep(beat)
-                }
-            }
-        }
-    }
-
-    // MARK: trim the slow stuff
-
-    private var trimToggle: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Trim slow intros & dead air")
-                    .font(VeFont.sans(14, weight: .semibold)).foregroundStyle(Color.veCharcoal)
-                Text("Cuts weak starts and silence — never mid-sentence.")
-                    .font(VeFont.sans(12)).foregroundStyle(Color.veWarmGray)
-            }
-            Spacer(minLength: 8)
-            Toggle("", isOn: $brief.trimSlowParts).labelsHidden().tint(Color.veTerracotta)
-        }
-        .padding(14)
-        .background(Color.white, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-    }
-
-    // MARK: note
-
-    private var noteField: some View {
-        TextField("e.g. open with me saying this is the best taco in LA, and keep the part where I show the price",
-                  text: $brief.note, axis: .vertical)
-            .font(VeFont.sans(14))
-            .foregroundStyle(Color.veCharcoal)
-            .lineLimit(3...6)
-            .padding(14)
-            .background(Color.white, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(Color.veCharcoal.opacity(0.12), lineWidth: 1.5))
+        .shadow(color: Color.veCharcoal.opacity(0.05), radius: 8, y: 2)
     }
 
     // MARK: submit bar
@@ -355,20 +315,12 @@ struct BriefView: View {
 
     private var confirmationSummary: String {
         var parts = ["Editing a \(brief.lengthDisplay) video"]
-        if !brief.hookSequence.isEmpty {
-            let opener = brief.hookSequence.map { $0.label.lowercased() }.joined(separator: " → ")
-            parts.append("opening on \(opener)")
-        }
         switch brief.brollLean {
         case .onCamera:  parts.append("staying on camera")
         case .balanced:  break
-        case .brollHeavy:parts.append("leaning on b-roll")
+        case .brollHeavy:parts.append("leaning on food shots")
         }
         if brief.plansVoiceover { parts.append("recording a voiceover") }
-        if !brief.keepBeats.isEmpty {
-            let beats = KeepBeat.allCases.filter { brief.keepBeats.contains($0) }.map { $0.label.lowercased() }
-            parts.append("keeping \(beats.joined(separator: " + "))")
-        }
         return parts.joined(separator: ", ") + " — sound right?"
     }
 
@@ -378,7 +330,8 @@ struct BriefView: View {
     private func section<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title.uppercased())
-                .font(VeFont.sans(12, weight: .bold)).tracking(0.5).foregroundStyle(Color.veWarmGray)
+                .font(VeFont.sans(12, weight: .bold)).tracking(0.5)
+                .foregroundStyle(Color.veWarmGray)
             content()
         }
         .padding(.top, 22)
@@ -393,25 +346,6 @@ struct BriefView: View {
     }
 
     // MARK: actions
-
-    private func hookOrder(_ shot: HookShot) -> Int? {
-        brief.hookSequence.firstIndex(of: shot).map { $0 + 1 }
-    }
-
-    private func toggleHook(_ shot: HookShot) {
-        if let i = brief.hookSequence.firstIndex(of: shot) {
-            brief.hookSequence.remove(at: i)
-        } else {
-            brief.hookSequence.append(shot)
-        }
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-    }
-
-    private func toggleKeep(_ beat: KeepBeat) {
-        if brief.keepBeats.contains(beat) { brief.keepBeats.remove(beat) }
-        else { brief.keepBeats.insert(beat) }
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-    }
 
     private func selectTemplate(_ t: StyleTemplate) {
         templates.setActive(t.id)
@@ -460,92 +394,5 @@ private struct BriefSelectCell: View {
                     .strokeBorder(selected ? Color.veTerracotta : Color.veCharcoal.opacity(0.12), lineWidth: 1.5))
         }
         .buttonStyle(.plain)
-    }
-}
-
-/// One multi-select chip (fills with `accent` when on).
-private struct BriefChip: View {
-    let label: String
-    let selected: Bool
-    let accent: Color
-    let action: () -> Void
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 5) {
-                if selected {
-                    Text("✓").font(VeFont.sans(13, weight: .heavy)).foregroundStyle(.white)
-                }
-                Text(label)
-                    .font(VeFont.sans(13.5, weight: .semibold))
-                    .foregroundStyle(selected ? .white : Color.veCharcoal)
-            }
-            .padding(.horizontal, 14).padding(.vertical, 10)
-            .background(selected ? accent : Color.white, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .strokeBorder(selected ? Color.clear : Color.veCharcoal.opacity(0.12), lineWidth: 1.5))
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-/// An opener chip that shows its 1-based ORDER (back-to-back sequence) when selected, instead of a check.
-private struct BriefHookChip: View {
-    let label: String
-    let order: Int?
-    let action: () -> Void
-    var body: some View {
-        let on = order != nil
-        return Button(action: action) {
-            HStack(spacing: 6) {
-                if let order {
-                    Text("\(order)")
-                        .font(VeFont.sans(11, weight: .heavy)).foregroundStyle(.white)
-                        .frame(width: 18, height: 18).background(Color.veTerracotta, in: Circle())
-                }
-                Text(label)
-                    .font(VeFont.sans(13.5, weight: .semibold))
-                    .foregroundStyle(on ? Color.veTerracotta : Color.veCharcoal)
-            }
-            .padding(.horizontal, 14).padding(.vertical, 10)
-            .background(on ? Color.veTerracotta.opacity(0.1) : Color.white,
-                        in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .strokeBorder(on ? Color.veTerracotta : Color.veCharcoal.opacity(0.12), lineWidth: 1.5))
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-/// Minimal wrap layout for the chip rows (iOS 16+ `Layout`).
-private struct BriefFlowLayout: Layout {
-    var spacing: CGFloat = 8
-    var lineSpacing: CGFloat = 8
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let maxW = proposal.width ?? .infinity
-        var x: CGFloat = 0, y: CGFloat = 0, rowH: CGFloat = 0, widest: CGFloat = 0
-        for v in subviews {
-            let s = v.sizeThatFits(.unspecified)
-            if x > 0, x + s.width > maxW {
-                widest = max(widest, x - spacing); x = 0; y += rowH + lineSpacing; rowH = 0
-            }
-            x += s.width + spacing
-            rowH = max(rowH, s.height)
-        }
-        widest = max(widest, x - spacing)
-        return CGSize(width: maxW == .infinity ? widest : maxW, height: y + rowH)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        var x = bounds.minX, y = bounds.minY, rowH: CGFloat = 0
-        for v in subviews {
-            let s = v.sizeThatFits(.unspecified)
-            if x > bounds.minX, x + s.width > bounds.maxX {
-                x = bounds.minX; y += rowH + lineSpacing; rowH = 0
-            }
-            v.place(at: CGPoint(x: x, y: y), anchor: .topLeading, proposal: ProposedViewSize(s))
-            x += s.width + spacing
-            rowH = max(rowH, s.height)
-        }
     }
 }

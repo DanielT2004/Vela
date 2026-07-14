@@ -6,10 +6,12 @@ import UIKit
 /// duration**, with a pinned live preview that re-stitches the proxy whenever you change anything.
 /// Interactions (each on its own conflict-free surface):
 ///   • grab the right-hand grip and drag to **reorder** (other blocks reflow to open a gap);
-///   • drag the bottom handle to **trim** (the block shrinks/grows in real time);
 ///   • swipe a block left to **cut** it into the Cut Tray;
 ///   • voiceover blocks expose **Swap b-roll** (choose a food close-up to cover the talking);
 ///   • "Change hook" opens the Hook Spotlight.
+/// (Trimming does NOT live here — the vertical drag-to-trim was unintuitive and hid what was being
+/// trimmed. Coarse trim consent is the Sort card's footage bar; frame-accurate trims are Polish's
+/// two-edge handles.)
 /// Every edit mutates the shared `EditPlanStore` and rebuilds the pinned preview.
 private enum TimelineTab { case main, broll }
 
@@ -40,9 +42,6 @@ struct TimelineView: View {
     @State private var contentMinY: CGFloat = 0         // blockStack top in the fixed viewport space (resting)
     @State private var contentMinYAtLift: CGFloat = 0
     @State private var scrollProxy: ScrollViewProxy?
-
-    // Trim (driven by the bottom handle)
-    @State private var trimming: (id: UUID, base: Double)?
 
     // Which layer the timeline is showing.
     @State private var tab: TimelineTab = .main
@@ -331,7 +330,7 @@ struct TimelineView: View {
                         .padding(.top, 6)
                         .padding(.bottom, 24)
                     }
-                    .scrollDisabled(draggingId != nil || trimming != nil)
+                    .scrollDisabled(draggingId != nil)
                     .coordinateSpace(name: timelineSpace)
                     // Scroll offset → `contentMinY` (blockStack top in viewport space: ≈6 at the top, negative
                     // as you scroll down). iOS 18+ uses the reliable `onScrollGeometryChange`; a GeometryReader
@@ -414,15 +413,12 @@ struct TimelineView: View {
                 duration: clip.sourceDuration,
                 durationText: durationText(clip.sourceDuration),
                 isHook: store.hookId == clip.sourceSegmentId,
-                isTrimming: trimming?.id == clip.id,
                 isDragging: dragging,
                 thumbnail: thumbs[clip.sourceSegmentId],
                 reorderSpace: timelineSpace,
                 onTapSeek: { seekPreview(to: clip.id) },
                 onCut: { cut(clip.sourceSegmentId) },
                 onMakeBroll: { makeBroll(clip.sourceSegmentId) },
-                onTrim: { dy in applyTrim(clip.id, dy: dy) },
-                onTrimEnd: { endTrim(clip.id) },
                 onReorderChanged: { dy in beginOrUpdateReorder(clip.id, dy: dy) },
                 onReorderEnded: { endReorder() }
             )
@@ -659,21 +655,6 @@ struct TimelineView: View {
         return contentMinYAtLift + staticTop(dragId) + blockHeight(dragClip) / 2 + dragRawTranslation
     }
 
-    /// Called continuously while the bottom handle is dragged (translation in points).
-    private func applyTrim(_ cid: UUID, dy: CGFloat) {
-        guard let store, let clip = store.order.first(where: { $0.id == cid }) else { return }
-        if trimming?.id != cid { trimming = (id: cid, base: clip.sourceDuration) }
-        let base = trimming?.base ?? clip.sourceDuration
-        store.setSourceDuration(cid, seconds: base + Double(dy / pps))
-    }
-
-    private func endTrim(_ cid: UUID) {
-        guard let store, let clip = store.order.first(where: { $0.id == cid }) else { trimming = nil; return }
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        Log.app("🎞️ Trim clip → \(durationText(clip.sourceDuration)). \(store.vibeText)")
-        trimming = nil
-    }
-
     private func cut(_ id: Int) {
         UINotificationFeedbackGenerator().notificationOccurred(.warning)
         withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {
@@ -753,7 +734,6 @@ private struct TimelineBlockView: View {
     let duration: Double
     let durationText: String
     let isHook: Bool
-    let isTrimming: Bool
     let isDragging: Bool
     let thumbnail: UIImage?
     /// Named coordinate space (owned by the timeline ScrollView) the grip drag measures in, so the
@@ -762,8 +742,6 @@ private struct TimelineBlockView: View {
     let onTapSeek: () -> Void
     let onCut: () -> Void
     let onMakeBroll: () -> Void
-    let onTrim: (CGFloat) -> Void
-    let onTrimEnd: () -> Void
     let onReorderChanged: (CGFloat) -> Void
     let onReorderEnded: () -> Void
 
@@ -780,7 +758,7 @@ private struct TimelineBlockView: View {
                     Spacer(minLength: 0)
                     Text(durationText)
                         .font(VeFont.sans(12.5, weight: .bold))
-                        .foregroundStyle(isTrimming ? Color.veTerracotta : Color.veWarmGray)
+                        .foregroundStyle(Color.veWarmGray)
                     cutButton
                 }
                 if !segment.description.isEmpty {
@@ -804,7 +782,6 @@ private struct TimelineBlockView: View {
                 .stroke(isHook ? Color.veTerracotta.opacity(0.55) : Color.clear, lineWidth: 1.5)
         )
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(alignment: .bottom) { trimHandle }
         .shadow(color: Color.veCharcoal.opacity(isDragging ? 0.22 : 0.06),
                 radius: isDragging ? 16 : 5, y: isDragging ? 12 : 2)
         .scaleEffect(isDragging ? 1.03 : 1)
@@ -839,8 +816,8 @@ private struct TimelineBlockView: View {
     /// Dedicated reorder handle — drag vertically to reposition this clip. The reorder gesture lives
     /// ONLY here (a small, full-height column on the right), never on the whole row, so the rest of the
     /// card stays free for the ScrollView to pan — a full-width reorder gesture starved the scroll and
-    /// froze it. `.highPriorityGesture` so a drag that starts on the grip reorders instead of scrolling
-    /// (the trim handle uses the same pattern). The `minimumDistance` keeps a stray tap from lifting.
+    /// froze it. `.highPriorityGesture` so a drag that starts on the grip reorders instead of scrolling.
+    /// The `minimumDistance` keeps a stray tap from lifting.
     private var reorderGrip: some View {
         Image(systemName: "line.3.horizontal")
             .font(.system(size: 16, weight: .semibold))
@@ -879,22 +856,6 @@ private struct TimelineBlockView: View {
         .buttonStyle(.plain)
     }
 
-    /// Bottom trim handle — drag vertically to lengthen/shorten. Its own high-priority drag so a touch
-    /// on the handle trims instead of triggering reorder. The hit area is a small CENTERED grabber
-    /// (not full-width) so the rest of the row stays free for the ScrollView to pan.
-    private var trimHandle: some View {
-        Capsule().fill(Color.veSurface)
-            .frame(width: 44, height: 5)
-            .overlay(Capsule().stroke(Color.veFaintGray.opacity(0.6), lineWidth: 1))
-            .frame(width: 90, height: 20)          // small centered hit target
-            .contentShape(Rectangle())
-            .padding(.bottom, 2)
-            .highPriorityGesture(
-                DragGesture(minimumDistance: 2)
-                    .onChanged { onTrim($0.translation.height) }
-                    .onEnded { _ in onTrimEnd() }
-            )
-    }
 }
 
 // MARK: - Controls-free player layer (externally owned AVPlayer)

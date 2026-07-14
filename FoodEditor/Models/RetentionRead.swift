@@ -14,6 +14,14 @@ struct RetentionRead {
 
     /// The winning opener's scroll-stop strength, from the raw hookScore (not the rounded meter count).
     enum ScrollStop { case strong, solid, workable, none
+        /// The ONE place score → band lives, shared by this read and `HookScoreMeter`'s text so the
+        /// two can't drift (the meter must never render the raw number — bands, not scores).
+        init(score: Double?) {
+            guard let score else { self = .none; return }
+            if score >= 8      { self = .strong }
+            else if score >= 5 { self = .solid }
+            else               { self = .workable }
+        }
         var label: String {
             switch self {
             case .strong:   return "a strong scroll-stopper"
@@ -129,10 +137,7 @@ struct RetentionRead {
         let hook = store.hookId.flatMap { store.segment($0) }
         let hs = hook?.hookScore ?? 0
         hookScore = hs
-        if hook == nil            { scrollStop = .none }
-        else if hs >= 8           { scrollStop = .strong }
-        else if hs >= 5           { scrollStop = .solid }
-        else                      { scrollStop = .workable }
+        scrollStop = ScrollStop(score: hook == nil ? nil : hs)
         hookSceneLabel = hook?.sceneType.label ?? ""
         hookWhy = Self.composeHookWhy(for: hook)
 
@@ -207,6 +212,12 @@ struct RetentionRead {
 
     var brollLabel: String { broll.label }
     var lengthReadLine: String { length.line }
+
+    /// Whether the cut ended up with little/no b-roll. Honest framing (2026-07-14): b-roll amount is
+    /// bounded by how much food-cutaway footage exists to layer over the talking — a light result isn't
+    /// a miss, it's what the footage supported, and it's hand-editable in Polish. Surfaced so The Read
+    /// can say so instead of letting "Light" read as a broken promise against a survey pick.
+    var brollIsLight: Bool { broll == .none || broll == .light }
 
     /// The map's shape line, honest about whether/where the payoff lands.
     var shapeLine: String {

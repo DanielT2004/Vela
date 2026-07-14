@@ -1,8 +1,8 @@
 import SwiftUI
 import UIKit
 
-/// The celebratory "curtain" shown over the freshly-mounted results map (`FirstCutView`) right after an
-/// analysis lands: "We finished your analysis", a fanned sneak-peek of the first moments, and a
+/// The celebratory "curtain" shown over the freshly-mounted Cut Card (`FirstCutView`) right after an
+/// analysis lands: "Your first cut is ready", a fanned sneak-peek of the first moments, and a
 /// continuously bouncing arrow inviting a swipe. Swiping up (1:1) lifts the whole curtain off-screen to
 /// expose the pixel-complete map underneath (Spotify-Wrapped style), then calls `onReveal`. It does NOT
 /// navigate — the map is already mounted beneath it, so there's no hand-off jank on the swipe.
@@ -57,7 +57,7 @@ struct RevealCurtain: View {
             .scaleEffect(appeared ? 1 : 0.5)
             .opacity(appeared ? 1 : 0)
 
-            Text("We finished your\nanalysis")
+            Text("Your first cut\nis ready")
                 .font(VeFont.serif(34))
                 .foregroundStyle(Color.veCharcoal)
                 .multilineTextAlignment(.center)
@@ -82,7 +82,7 @@ struct RevealCurtain: View {
             Button { revealNow() } label: {
                 VStack(spacing: 6) {
                     BounceArrow()
-                    Text("Swipe up to see your results")
+                    Text("Swipe up to see your cut")
                         .font(VeFont.sans(13, weight: .semibold))
                         .foregroundStyle(Color.veNoteText)
                 }

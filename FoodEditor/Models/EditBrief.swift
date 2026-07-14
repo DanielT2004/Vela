@@ -156,11 +156,12 @@ enum HookShot: String, CaseIterable, Equatable {
 enum BrollLean: String, CaseIterable, Equatable {
     case onCamera, balanced, brollHeavy
 
+    // Display-only (the prompt reads `phrasing`) — plain words a first-timer parses off vibes.
     var label: String {
         switch self {
-        case .onCamera:  return "Keep me on camera"
-        case .balanced:  return "Balanced"
-        case .brollHeavy:return "Lean on b-roll"
+        case .onCamera:  return "Mostly me"
+        case .balanced:  return "A mix"
+        case .brollHeavy:return "Mostly food"
         }
     }
 

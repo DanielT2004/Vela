@@ -150,9 +150,11 @@ struct HomeButton: View {
     }
 }
 
-/// A small 10-segment meter visualizing `hook_score` / 10 (the AI's relative read of an opener's
+/// A small 10-segment meter visualizing `hook_score` (the AI's relative read of an opener's
 /// scroll-stop strength across THIS creator's footage). Shared by the Hook Spotlight and the post-
 /// analysis recap so both render one implementation. Set `showLabel: false` for the compact runner-up form.
+/// Honesty model: the bar is visual only and the text is a BAND word via `RetentionRead.ScrollStop` —
+/// the raw score is never rendered as a number.
 struct HookScoreMeter: View {
     let score: Double
     var showLabel: Bool = true
@@ -171,7 +173,7 @@ struct HookScoreMeter: View {
                         .frame(width: 5, height: 9)
                 }
             }
-            Text("\(filled)/10")
+            Text(RetentionRead.ScrollStop(score: score).shortLabel)
                 .font(VeFont.sans(11, weight: .bold))
                 .foregroundStyle(Color.veWarmGray)
         }

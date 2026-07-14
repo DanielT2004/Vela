@@ -9,6 +9,7 @@ struct ExportView: View {
     @Environment(AppRouter.self) private var router
     @Environment(VideoSession.self) private var session
     @Environment(ProjectService.self) private var projects
+    @Environment(TemplateService.self) private var templates
 
     private enum Phase: Equatable { case working, ready(URL), failed(String) }
     private enum SaveState: Equatable { case idle, saving, saved, failed(String), denied }
@@ -51,7 +52,10 @@ struct ExportView: View {
         HStack {
             BackChevronButton { player.pause(); router.back() }
             Spacer()
-            if case .ready = phase { VibeMeterPill(text: store?.vibeText ?? "") }
+            // Facts, not vibes: the pill shows real duration only (honesty model — no band sentence here).
+            if case .ready = phase, let store {
+                VibeMeterPill(text: "~\(Int(store.totalDuration.rounded()))s · ready to post")
+            }
             Spacer()
             Color.clear.frame(width: 36, height: 36)
         }
@@ -129,6 +133,17 @@ struct ExportView: View {
             .padding(.top, 2)
 
             feedbackRow
+            // The highest-trust moment to offer the style-learn (only while no template exists):
+            // the creator just saw what smart defaults produce and now wants it to sound like THEM.
+            if templates.templates.isEmpty {
+                Button { router.go(.createSource) } label: {
+                    Text("Next one in YOUR style? Show Vela a posted video →")
+                        .font(VeFont.sans(12.5, weight: .semibold))
+                        .foregroundStyle(Color.veTerracotta)
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 2)
+            }
         }
         .padding(.horizontal, 22)
         .transition(.scale(scale: 0.96).combined(with: .opacity))
@@ -139,7 +154,7 @@ struct ExportView: View {
     private var feedbackRow: some View {
         VStack(spacing: 8) {
             if let feedback {
-                Text(feedback ? "Love it — Vela's learning your taste." : "Noted — we'll tune the next one.")
+                Text(feedback ? "Love that — noted for next time." : "Noted — thanks for being honest.")
                     .font(VeFont.sans(12.5, weight: .semibold))
                     .foregroundStyle(Color.veSage)
                     .transition(.opacity)
@@ -332,7 +347,7 @@ struct ExportView: View {
             try await PhotoLibrary.saveVideo(at: url)
             await MainActor.run { saveState = .saved }
             NotificationService.shared.notify(title: "Your edit is saved 🎉",
-                                              body: "Your \(store?.vibeText ?? "") cut is in your camera roll.")
+                                              body: "Your cut is in your camera roll — ready to post.")
         } catch PhotoSaveError.denied {
             await MainActor.run { saveState = .denied }
         } catch {

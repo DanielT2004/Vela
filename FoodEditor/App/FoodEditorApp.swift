@@ -30,6 +30,7 @@ struct FoodEditorApp: App {
         FileTemplateStore.runSelfTest()
         EditPlanValidator.selfCheck()   // Phase 1 — prints ✅/❌ to the console on every debug launch
         EditPlanRepair.selfCheck()      // b-roll source-not-kept repair
+        EditPlanRepair.coverageSelfCheck()   // coverage holes → "watch it and decide" review segments
         WordSnapper.selfCheck()         // cuts snap to word boundaries — never mid-word
         ContentIndexNormalizer.selfCheck()   // PERCEIVE index: split >15s shots, drop zero-len spans
         EditPlanAdapter.selfCheck()     // DECIDE decisions + index → a valid EditPlan

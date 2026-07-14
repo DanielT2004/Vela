@@ -33,6 +33,7 @@ struct HomeView: View {
                         yourTemplatesCard(active).padding(.top, 12)
                     }
                     newVideoCard.padding(.top, 16)
+                    if templates.templates.isEmpty { styleInviteCard.padding(.top, 12) }
                     if projectList.isEmpty {
                         emptyState.padding(.top, 40)
                     } else {
@@ -331,7 +332,7 @@ struct HomeView: View {
                     Text("New video")
                         .font(VeFont.serif(23))
                         .foregroundStyle(Color.veOnTerracotta)
-                    Text("Drop raw footage — get an 80%-done cut")
+                    Text("Drop raw clips — Vela makes the first cut.")
                         .font(VeFont.sans(13))
                         .foregroundStyle(Color.veOnTerracotta.opacity(0.85))
                 }
@@ -345,6 +346,37 @@ struct HomeView: View {
             .padding(20)
             .background(Color.veTerracotta, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
             .shadow(color: Color.veTerracotta.opacity(0.32), radius: 13, y: 10)
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Magic moment #2's front-door replacement: with the onboarding style-learn now skippable, this
+    /// quiet invite (only while NO template exists) is how the skipped first-timer meets the learn.
+    private var styleInviteCard: some View {
+        Button { router.go(.createSource) } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(Color.veTerracotta)
+                    .frame(width: 40, height: 40)
+                    .background(Color.veTerracotta.opacity(0.1), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Vela can learn your style")
+                        .font(VeFont.sans(14.5, weight: .bold))
+                        .foregroundStyle(Color.veCharcoal)
+                    Text("Show it 1–3 posted videos — every cut after comes out sounding like you.")
+                        .font(VeFont.sans(12))
+                        .foregroundStyle(Color.veWarmGray)
+                        .lineSpacing(1.5)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Color.veFaintGray)
+            }
+            .padding(14)
+            .background(Color.white, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .shadow(color: Color.veCharcoal.opacity(0.05), radius: 8, y: 3)
         }
         .buttonStyle(.plain)
     }

@@ -4,7 +4,7 @@ import Foundation
 /// answer are `Log.blob`'d to the console and then thrown away (`AnalysisJobStore.clear()` deletes the
 /// proxy). This store persists a per-run bundle to `Documents/VelaRuns/<stamp>-<sig8>/` so a run can be
 /// inspected, AirDropped to a Mac, and replayed in the off-device prompt lab. Pure side-effect helper —
-/// best-effort, never throws into the pipeline, and gated so it doesn't run in release by default.
+/// best-effort, never throws into the pipeline, and toggleable (see `isEnabled`).
 ///
 /// Bundle layout:
 ///   proxy.mp4        — the exact 720p proxy Gemini watched
@@ -15,18 +15,15 @@ import Foundation
 ///   meta.json        — PERCEIVE/monolith model + config; DECIDE model/job/fallback (two-call); proxy duration/fps, char counts, jobId, completeness
 enum EvalArtifactStore {
 
-    /// Capture is ON by default in DEBUG, OFF in release; the Home debug card flips this. Stored as an
-    /// override so an explicit choice survives relaunch.
+    /// Capture is ON by default in EVERY build — TestFlight testers' bundles are how remote bugs get
+    /// diagnosed (a tester's "missing clip" was unreproducible until a bundle showed the trims).
+    /// Debug builds share via the Home debug card; Release shares via the Files app
+    /// (`UIFileSharingEnabled` exposes Documents/VelaRuns). Stored as an override so an explicit
+    /// choice survives relaunch.
     private static let defaultsKey = "velaCaptureEvalArtifacts"
     static var isEnabled: Bool {
         get {
-            if UserDefaults.standard.object(forKey: defaultsKey) == nil {
-                #if DEBUG
-                return true
-                #else
-                return false
-                #endif
-            }
+            if UserDefaults.standard.object(forKey: defaultsKey) == nil { return true }
             return UserDefaults.standard.bool(forKey: defaultsKey)
         }
         set { UserDefaults.standard.set(newValue, forKey: defaultsKey) }

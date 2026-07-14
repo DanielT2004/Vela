@@ -26,6 +26,7 @@ enum PreprocessError: LocalizedError {
     case noClips
     case trackCreationFailed
     case noVideoTrack
+    case clipUnreadable(Int)
     case exportInit
     case exportFailed(String)
 
@@ -34,6 +35,8 @@ enum PreprocessError: LocalizedError {
         case .noClips:             return "No clips to process."
         case .trackCreationFailed: return "Couldn't create the composition tracks."
         case .noVideoTrack:        return "A selected clip had no video track."
+        case .clipUnreadable(let n):
+            return "Clip \(n) couldn't be read from your library, so Vela can't include it. Remove it from the selection (or re-save it to your camera roll) and try again."
         case .exportInit:          return "Couldn't start the video exporter."
         case .exportFailed(let m): return "Export failed: \(m)"
         }
@@ -70,9 +73,13 @@ enum VideoPreprocessor {
 
         for (i, clip) in clips.enumerated() {
             let asset = AVURLAsset(url: clip.url)
+            // A clip that can't be included is a HARD failure, never a silent skip — a quietly dropped
+            // clip means footage the creator selected never reaches Gemini, the Sort deck, or the edit,
+            // with nothing telling them why ("my clip is missing"). Fail with the clip number so they
+            // can fix the selection and retry.
             guard let vTrack = try await asset.loadTracks(withMediaType: .video).first else {
-                Log.compress("Clip \(i + 1) has no video track — skipping.")
-                continue
+                Log.compress("Clip \(i + 1) has no video track — FAILING the merge (no silent drops).")
+                throw PreprocessError.clipUnreadable(i + 1)
             }
             let duration = try await asset.load(.duration)
             let range = CMTimeRange(start: .zero, duration: duration)
@@ -80,8 +87,8 @@ enum VideoPreprocessor {
             do {
                 try compVideo.insertTimeRange(range, of: vTrack, at: cursor)
             } catch {
-                Log.compress("Clip \(i + 1) video insert failed: \(error.localizedDescription) — skipping.")
-                continue
+                Log.compress("Clip \(i + 1) video insert failed: \(error.localizedDescription) — FAILING the merge (no silent drops).")
+                throw PreprocessError.clipUnreadable(i + 1)
             }
             if let aTrack = try await asset.loadTracks(withMediaType: .audio).first {
                 try? compAudio.insertTimeRange(range, of: aTrack, at: cursor)
@@ -90,6 +97,17 @@ enum VideoPreprocessor {
             let naturalSize = try await vTrack.load(.naturalSize)
             let preferred = try await vTrack.load(.preferredTransform)
             let displaySize = orientedSize(naturalSize, preferred)
+
+            // Diagnostic: name each clip's transfer function so an HDR source (HLG / PQ — iPhone
+            // camera default) is visible in the log. HDR is why proxy THUMBNAILS looked dim/washed:
+            // AVAssetImageGenerator doesn't tone-map, so HDR frames render flat as stills while the
+            // live player shows them vividly. The proxy is pinned to SDR below.
+            if let desc = try await vTrack.load(.formatDescriptions).first {
+                let ext = CMFormatDescriptionGetExtensions(desc) as? [String: Any] ?? [:]
+                let transfer = ext[kCVImageBufferTransferFunctionKey as String] as? String ?? "unknown"
+                let isHDR = transfer.contains("2100") || transfer.contains("2084") || transfer.contains("HLG")
+                Log.compress("Clip \(i + 1) transfer: \(transfer)\(isHDR ? " (HDR → will tone-map to SDR)" : "")")
+            }
 
             if i == 0 { renderSize = normalizedRenderSize(for: displaySize) }
 
@@ -114,7 +132,16 @@ enum VideoPreprocessor {
         videoComposition.renderSize = renderSize
         videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
         videoComposition.instructions = layerInstructions
-        Log.compress("Render size \(Int(renderSize.width))×\(Int(renderSize.height)), total \(String(format: "%.1f", CMTimeGetSeconds(cursor)))s. Exporting…")
+        // Pin the proxy to SDR (Rec.709). iPhone camera footage is HDR (Dolby Vision/HLG) by
+        // default, and `AVAssetExportPresetHighestQuality` PRESERVES HDR — which made proxy
+        // thumbnails (AVAssetImageGenerator, no tone mapping) look dim/desaturated for HDR-shot
+        // clips while SDR clips looked fine. The proxy is an analysis/preview artifact: one
+        // consistent color space for thumbnails, inline players, and the Gemini upload. The
+        // full-res export path (EditPlanAssembler, cutting from originals) is untouched.
+        videoComposition.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2
+        videoComposition.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2
+        videoComposition.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2
+        Log.compress("Render size \(Int(renderSize.width))×\(Int(renderSize.height)), total \(String(format: "%.1f", CMTimeGetSeconds(cursor)))s, SDR-pinned (709). Exporting…")
 
         guard let export = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
             throw PreprocessError.exportInit

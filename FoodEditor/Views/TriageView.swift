@@ -1,7 +1,15 @@
 import SwiftUI
 import UIKit
+import Observation
 
 private enum TriageAction { case keep, cut, hook, broll }
+
+/// The front card's playback position, fed by `LoopingPlayerView.onTime` (~10Hz). A tiny
+/// `@Observable` box so ONLY the leaf views that read `seconds` in their body (the footage bar's
+/// playhead + the trim-zone pill) re-render on each tick — never the whole card.
+@Observable final class PlaybackClock {
+    var seconds: Double = 0
+}
 
 /// A clip's current standing in the live edit — drives the synced Sort card's styling so the deck
 /// reflects exactly what Arrange/Polish show (hook outlined, B-roll tinted, cut dimmed).
@@ -10,13 +18,21 @@ enum ClipStatus { case hook, broll, cut, normal }
 /// Ochre accent for the B-roll action (distinct from cut's terracotta and keep's sage).
 private let veBrollTone = Color(hex: 0x9A7350)
 
+/// Duration with a decimal under 10s — the words must agree with the footage bar's geometry
+/// ("1s of 3s" drawn at 44% reads as a contradiction; "1.4s of 3.2s" doesn't).
+private func fmtDur(_ d: Double) -> String {
+    d < 10 ? String(format: "%.1fs", d) : "\(Int(d.rounded()))s"
+}
+
 /// The AI's single recommendation for a segment, surfaced on each Triage card so the creator can
 /// decide fast — while keeping the final say. Derived purely from fields Gemini already returns.
 private enum AIVerdict {
     case cut, unsure, broll, voiceover, strongKeep, keeper
 
     init(_ seg: Segment) {
-        if !seg.keep { self = .cut }
+        // confidence 0 = a coverage-fill segment the AI never analyzed (EditPlanRepair.fillCoverageGaps)
+        // — "Your call", never "Suggested cut" (there is no suggestion to show).
+        if !seg.keep { self = seg.confidence <= 0 ? .unsure : .cut }
         else if seg.isLowConfidence { self = .unsure }
         else if seg.sceneType == .foodCloseup { self = .broll }
         else if seg.voiceoverCandidate { self = .voiceover }
@@ -83,18 +99,25 @@ private enum AIVerdict {
 
 /// M6 — Layer 1 Triage (the Swipe Deck). The signature interaction: review the AI's segments as a
 /// stack of cards. Swipe right = keep, left = cut (into the Cut Tray), up = make it the hook.
-/// The front card auto-plays its slice (with sound) so you watch before deciding; an Autoplay toggle
-/// turns that off. Each action gives visual + haptic feedback and mutates the shared `EditPlanStore`.
+/// The front card always auto-plays its slice (with sound) so you watch before deciding — the deck's
+/// core promise; a quiet look lives in the tap-to-preview sheet. (The old Autoplay on/off toggle was
+/// removed 2026-07-14: a viewing preference that degraded decisions to thumbnail guesses, and the
+/// trigger surface of the beta's player-lifecycle bug.) Each action gives visual + haptic feedback
+/// and mutates the shared `EditPlanStore`.
 struct TriageView: View {
     @Environment(VideoSession.self) private var session
+    @Environment(AppRouter.self) private var router
 
     @State private var triageIndex = 0
     @State private var dragOffset: CGSize = .zero
     @State private var thumbs: [Int: UIImage] = [:]
     @State private var showCutTray = false
     @State private var previewSegment: Segment?
-    @State private var autoPlay = true
     @State private var flash: TriageAction?
+    /// "The Read" presented from the done-card's built-on link (same sheet as the Cut Card's lip).
+    @State private var showBreakdown = false
+    /// First-deck teaching: the swipe instruction line shows on the first two decks ever, then never.
+    @AppStorage("veFirstDeckHints") private var firstDeckHints = 0
     /// The deck order, **frozen on appear** (see `buildDeck`). Derived from the live edit so Sort shows
     /// the current cut — but captured once so swiping (which mutates the store) can't reshuffle mid-pass.
     @State private var deckIds: [Int] = []
@@ -128,6 +151,7 @@ struct TriageView: View {
     private func buildDeck() {
         deckIds = liveDeckIds
         if triageIndex > deckIds.count { triageIndex = deckIds.count }
+        if firstDeckHints <= 2 { firstDeckHints += 1 }   // teaching line retires after the second deck
     }
 
     /// Restore a cut clip and make it the **front card** so the user can immediately re-edit it. The clip
@@ -141,13 +165,36 @@ struct TriageView: View {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
 
-    /// The clip's live in/out range (honoring trims) when it's on the spine; else the segment's bounds.
+    /// 🔒 Sort is the RAW-footage layer: every card (and its preview sheet) plays the segment's FULL
+    /// bounds — never an AI trim or a live spine trim. A trim once hid the exact moment a card's
+    /// description promised (the "thumbs up" bug: footage past `trim_to_seconds` was unwatchable
+    /// anywhere in the app). The creator must be able to watch every second before deciding; trims are
+    /// shown by the footage bar and applied only at commit.
     private func range(_ segId: Int) -> (start: Double, end: Double) {
-        if let clip = store?.order.first(where: { $0.sourceSegmentId == segId }) {
-            return (clip.inPoint, clip.outPoint)
-        }
         let s = store?.segment(segId)
-        return (s?.startSeconds ?? 0, s?.trimToSeconds ?? s?.endSeconds ?? 0)
+        return (s?.startSeconds ?? 0, s?.endSeconds ?? 0)
+    }
+
+    // MARK: trim keep-mode (the footage-bar toggle)
+
+    /// Per-card "what does keep include" override for trimmed segments, set by the card's
+    /// Best-part/Full-clip picker. nil = derive from the live spine clip (full-span → full clip,
+    /// else Vela's pick).
+    @State private var keepModeOverrides: [Int: Bool] = [:]
+
+    /// Whether a keep-swipe on this segment commits the FULL clip (true) or Vela's pick (false).
+    private func keepsFullClip(_ seg: Segment) -> Bool {
+        if let choice = keepModeOverrides[seg.id] { return choice }
+        guard let clip = store?.order.first(where: { $0.sourceSegmentId == seg.id }) else { return false }
+        return abs(clip.inPoint - seg.startSeconds) < 0.05 && abs(clip.outPoint - seg.endSeconds) < 0.05
+    }
+
+    private func setKeepMode(_ seg: Segment, full: Bool) {
+        guard keepsFullClip(seg) != full else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+            keepModeOverrides[seg.id] = full
+        }
     }
 
     /// The clip's current standing in the edit (drives card styling).
@@ -172,7 +219,6 @@ struct TriageView: View {
                 if !isDone && session.furthestStage == .sort { acceptPicksBanner }
                 deck
                 actionButtons
-                bottomRow
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             if showCutTray { cutTraySheet }
@@ -186,6 +232,15 @@ struct TriageView: View {
                 SlicePlayerSheet(url: proxyURL, start: r.start, end: r.end, caption: seg.description)
             }
         }
+        .sheet(isPresented: $showBreakdown) {
+            if let store {
+                BreakdownSheet(store: store,
+                               read: RetentionRead(plan: store.plan, store: store),
+                               thumbs: thumbs, proxyURL: proxyURL)
+                    .presentationDetents([.fraction(0.55), .large])
+                    .presentationDragIndicator(.visible)
+            }
+        }
     }
 
     private var progressHeader: some View {
@@ -194,7 +249,9 @@ struct TriageView: View {
                 Text(isDone ? "All sorted" : "Reviewing · \(min(triageIndex + 1, queue.count)) of \(queue.count)")
                     .font(VeFont.sans(12.5, weight: .semibold))
                     .foregroundStyle(Color.veWarmGray)
-                if !isDone {
+                // First-deck teaching only (counted per deck in buildDeck) — the one-shot hint nudge
+                // on the card is the permanent gesture teacher; persistent copy was reading tax.
+                if !isDone && firstDeckHints <= 2 {
                     Text("Swipe the card, or tap a button below")
                         .font(VeFont.sans(11))
                         .foregroundStyle(Color.veFaintGray)
@@ -202,11 +259,29 @@ struct TriageView: View {
             }
             HStack {
                 Spacer()
-                autoPlayToggle
+                cutTrayPill
             }
             .padding(.trailing, 22)
         }
         .padding(.bottom, 6)
+    }
+
+    /// The Cut Tray entry, relocated from the deleted bottom row (its "Fine-tune" twin was redundant
+    /// with the StageSwitcher + done-card) — the reclaimed row is what lets the cards grow.
+    private var cutTrayPill: some View {
+        Button { withAnimation { showCutTray = true } } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "tray")
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.veWarmGray)
+                Text("\(store?.cutTray.count ?? 0)")
+                    .font(VeFont.sans(11, weight: .bold)).foregroundStyle(.white)
+                    .padding(.horizontal, 6).frame(minWidth: 18, minHeight: 18)
+                    .background(Color.veTerracotta, in: Capsule())
+            }
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .background(Color.veSurface, in: Capsule())
+        }
+        .buttonStyle(.plain)
     }
 
     /// Shows the content-section the current card belongs to; the `.id(currentSection)` swaps it with a
@@ -219,21 +294,6 @@ struct TriageView: View {
                                         removal: .opacity))
                 .padding(.bottom, 6)
         }
-    }
-
-    private var autoPlayToggle: some View {
-        Button { withAnimation { autoPlay.toggle() } } label: {
-            HStack(spacing: 5) {
-                Image(systemName: autoPlay ? "play.circle.fill" : "pause.circle")
-                    .font(.system(size: 13, weight: .bold))
-                Text("Autoplay")
-                    .font(VeFont.sans(12, weight: .bold))
-            }
-            .foregroundStyle(autoPlay ? Color.veSage : Color.veWarmGray)
-            .padding(.horizontal, 11).padding(.vertical, 7)
-            .background(autoPlay ? Color.veSage.opacity(0.12) : Color.veSurface, in: Capsule())
-        }
-        .buttonStyle(.plain)
     }
 
     /// The "do the thinking for me" shortcut: apply every AI pick and jump to the timeline.
@@ -284,10 +344,11 @@ struct TriageView: View {
                                    rangeStart: range(seg.id).start,
                                    rangeEnd: range(seg.id).end,
                                    isFront: true,
-                                   autoPlay: autoPlay,
                                    playerActive: playerActive,
                                    proxyURL: proxyURL,
                                    dragOffset: dragOffset,
+                                   keepsFullClip: keepsFullClip(seg),
+                                   onSelectKeepMode: { full in setKeepMode(seg, full: full) },
                                    onTapPreview: { previewSegment = seg })
                         .frame(width: geo.size.width)
                         .id(seg.id)   // fresh inline player per segment
@@ -297,7 +358,7 @@ struct TriageView: View {
             }
             .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
         }
-        .padding(.horizontal, 26)
+        .padding(.horizontal, 16)   // was 26 — the "dating profile" ask: footage as big as the deck allows
         .padding(.top, 6)
     }
 
@@ -330,6 +391,9 @@ struct TriageView: View {
             .transition(.scale(scale: 0.5).combined(with: .opacity))
     }
 
+    /// The deck's finish line ACTS instead of talking: for the off-vibes creator this is the end of the
+    /// journey, so Export is right here (the store is shared — exporting from Sort renders the same cut
+    /// the header's Export would). Facts, not vibe bands, per the honesty model.
     private var doneCard: some View {
         VStack(spacing: 14) {
             ZStack {
@@ -337,9 +401,30 @@ struct TriageView: View {
                 Image(systemName: "checkmark").font(.system(size: 26, weight: .bold)).foregroundStyle(.white)
             }
             Text("All sorted").font(VeFont.serif(25)).foregroundStyle(Color.veCharcoal)
-            Text("\(store?.vibeText ?? ""). Polish the shape, or export now.")
+            Text("All \(deckIds.count) clips sorted — your cut is ~\(Int((store?.totalDuration ?? 0).rounded()))s.")
                 .font(VeFont.sans(13.5)).foregroundStyle(Color.veWarmGray)
                 .multilineTextAlignment(.center).frame(maxWidth: 260)
+
+            PrimaryActionButton(title: "Export my video") {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                router.go(.export)
+            }
+            .padding(.horizontal, 26)
+            .padding(.top, 4)
+
+            Button {
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) { session.editorStage = .arrange }
+            } label: {
+                Text("Fine-tune first →")
+                    .font(VeFont.sans(13.5, weight: .bold)).foregroundStyle(Color.veCharcoal)
+            }
+            .buttonStyle(.plain)
+
+            Button { showBreakdown = true } label: {
+                Text("See what your cut is built on →")
+                    .font(VeFont.sans(12.5, weight: .semibold)).foregroundStyle(Color.veTerracotta)
+            }
+            .buttonStyle(.plain)
         }
         .transition(.scale.combined(with: .opacity))
     }
@@ -388,41 +473,6 @@ struct TriageView: View {
             .buttonStyle(.plain)
             Text(label).font(VeFont.sans(11, weight: .bold)).foregroundStyle(fg == .white ? bg : fg)
         }
-    }
-
-    // MARK: bottom row
-
-    private var bottomRow: some View {
-        HStack(spacing: 10) {
-            Button { withAnimation { showCutTray = true } } label: {
-                HStack(spacing: 9) {
-                    Image(systemName: "tray")
-                        .font(.system(size: 14, weight: .semibold)).foregroundStyle(Color.veWarmGray)
-                    Text("Cut Tray").font(VeFont.sans(13, weight: .semibold)).foregroundStyle(Color.veNoteText)
-                    Spacer()
-                    Text("\(store?.cutTray.count ?? 0)")
-                        .font(VeFont.sans(12, weight: .bold)).foregroundStyle(.white)
-                        .padding(.horizontal, 7).frame(minWidth: 20, minHeight: 20)
-                        .background(Color.veTerracotta, in: Capsule())
-                }
-                .padding(.horizontal, 15).padding(.vertical, 10)
-                .background(Color.veSurface, in: Capsule())
-            }
-            .buttonStyle(.plain)
-
-            Button {
-                withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) { session.editorStage = .arrange }
-            } label: {
-                Text("Fine-tune →")
-                    .font(VeFont.sans(13.5, weight: .bold)).foregroundStyle(Color.veCream)
-                    .padding(.horizontal, 18).padding(.vertical, 11)
-                    .background(Color.veCharcoal, in: Capsule())
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.horizontal, 22)
-        .padding(.top, 6)
-        .padding(.bottom, 8)
     }
 
     // MARK: cut tray sheet
@@ -531,13 +581,21 @@ struct TriageView: View {
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
+            // The card commits what the footage bar shows: keep/hook honor the trimmed card's
+            // "Vela's cut / full clip" toggle (untrimmed cards always pass full — same bounds).
+            let full = keepsFullClip(seg)
             switch action {
-            case .keep:  store?.keep(seg.id)
-            case .cut:   store?.cut(seg.id)
-            case .hook:  store?.setHook(seg.id)
-            case .broll: store?.markBroll(seg.id)
+            case .keep:
+                if seg.hasTrim { store?.keep(seg.id, fullClip: full) } else { store?.keep(seg.id) }
+            case .cut:
+                store?.cut(seg.id)
+            case .hook:
+                if seg.hasTrim { store?.setHook(seg.id, fullClip: full) } else { store?.setHook(seg.id) }
+            case .broll:
+                store?.markBroll(seg.id)
             }
-            Log.app("Triage \(action) → segment \(seg.id) (\(seg.sceneType.label)). \(store?.vibeText ?? "")")
+            let mode = seg.hasTrim ? (full ? " [full clip]" : " [Vela's cut]") : ""
+            Log.app("Triage \(action)\(mode) → segment \(seg.id) (\(seg.sceneType.label)). \(store?.vibeText ?? "")")
             triageIndex += 1
             dragOffset = .zero
         }
@@ -581,20 +639,29 @@ private struct TriageCardView: View {
     let thumbnail: UIImage?
     /// The clip's current standing in the live edit (hook / B-roll / cut / normal) — drives styling.
     let status: ClipStatus
-    /// The clip's live in/out range (honoring trims), so the card plays the edited slice.
+    /// The segment's FULL bounds — the card always plays every second of its footage (Sort is the
+    /// raw-footage layer; the AI trim is shown by the footage bar, never hidden from playback).
     let rangeStart: Double
     let rangeEnd: Double
     let isFront: Bool
-    let autoPlay: Bool
     let playerActive: Bool
     let proxyURL: URL?
     let dragOffset: CGSize
+    /// Trimmed cards: whether a keep-swipe commits the full clip (true) or Vela's pick (false).
+    let keepsFullClip: Bool
+    /// The Best-part/Full-clip picker changed (true = full clip).
+    let onSelectKeepMode: (Bool) -> Void
     let onTapPreview: () -> Void
 
     private var isHook: Bool { status == .hook }
 
-    private var showsPlayer: Bool { isFront && autoPlay && proxyURL != nil }
+    private var showsPlayer: Bool { isFront && proxyURL != nil }
     private var showsHints: Bool { isFront && dragOffset == .zero }
+    /// Playback position for the footage-bar playhead + trim-zone pill (one clock per card — the
+    /// deck recreates the card per segment via `.id(seg.id)`).
+    @State private var clock = PlaybackClock()
+    /// Live position feedback only makes sense while the inline player is actually running.
+    private var playheadLive: Bool { showsPlayer && playerActive }
 
     /// One-shot "swipe hint": when the card appears it slides toward its suggested side, then springs
     /// back to rest — a quick preview of the recommended swipe. 0 at rest, →1 at full nudge.
@@ -668,11 +735,19 @@ private struct TriageCardView: View {
                 LoopingPlayerView(url: url,
                                   start: rangeStart,
                                   end: rangeEnd,
-                                  isPlaying: playerActive)
+                                  isPlaying: playerActive,
+                                  onTime: { [clock] t in clock.seconds = t })
             } else if let thumbnail {
                 Image(uiImage: thumbnail).resizable().scaledToFill()
             } else {
                 FoodTile(tone: segment.sceneType.foodTone, cornerRadius: 0)
+            }
+
+            // Wordless trim preview: while the loop plays footage that won't be included ("Best
+            // part" selected), the video gently dims — bright = in your video, dimmed = out.
+            if segment.hasTrim {
+                TrimDimOverlay(segment: segment, keepsFullClip: keepsFullClip,
+                               live: playheadLive, clock: clock)
             }
 
             // caption + tap-to-enlarge affordance
@@ -699,8 +774,9 @@ private struct TriageCardView: View {
             // persistent direction hints (idle only)
             directionHints.opacity(showsHints ? 1 : 0)
 
-            // live swipe badges (while dragging)
-            badge("KEEP", color: Color.veSage, rotation: 8, opacity: keepOpacity, alignment: .topTrailing)
+            // live swipe badges (while dragging) — on a trimmed card the KEEP badge names the exact
+            // amount the swipe commits, so the toggle's meaning is restated at the moment of decision.
+            badge(keepBadgeText, color: Color.veSage, rotation: 8, opacity: keepOpacity, alignment: .topTrailing)
             badge("CUT", color: Color.veTerracotta, rotation: -8, opacity: cutOpacity, alignment: .topLeading)
             badge("★ HOOK", color: Color.veCharcoal, rotation: 0, opacity: hookOpacity, alignment: .top)
             badge("↓ B-ROLL", color: veBrollTone, rotation: 0, opacity: brollOpacity, alignment: .bottom)
@@ -750,6 +826,11 @@ private struct TriageCardView: View {
                 Text("\(Int((rangeEnd - rangeStart).rounded()))s")
                     .font(VeFont.sans(12.5, weight: .semibold)).foregroundStyle(Color.veWarmGray)
             }
+            if segment.hasTrim {
+                TrimFootageBar(segment: segment, keepsFullClip: keepsFullClip,
+                               live: playheadLive, clock: clock,
+                               onSelect: onSelectKeepMode)
+            }
             let why = verdict.reason(segment)
             if !why.isEmpty { ReasonNote(text: why) }
         }
@@ -772,9 +853,174 @@ private struct TriageCardView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment)
     }
 
+    /// "KEEP 1.4s" / "KEEP ALL · 3.2s" on trimmed cards; plain "KEEP" otherwise.
+    private var keepBadgeText: String {
+        guard segment.hasTrim else { return "KEEP" }
+        if keepsFullClip { return "KEEP ALL · \(fmtDur(segment.endSeconds - segment.startSeconds))" }
+        return "KEEP \(fmtDur((segment.trimToSeconds ?? segment.endSeconds) - segment.startSeconds))"
+    }
+
     private var isVertical: Bool { abs(dragOffset.height) > abs(dragOffset.width) }
     private var keepOpacity: Double { (!isVertical && dragOffset.width > 0) ? min(1, dragOffset.width / 90) : 0 }
     private var cutOpacity: Double { (!isVertical && dragOffset.width < 0) ? min(1, -dragOffset.width / 90) : 0 }
     private var hookOpacity: Double { (isVertical && dragOffset.height < 0) ? min(1, -dragOffset.height / 110) : 0 }
     private var brollOpacity: Double { (isVertical && dragOffset.height > 0) ? min(1, dragOffset.height / 110) : 0 }
+}
+
+// MARK: - Trim footage bar
+
+/// The trimmed card's trim strip: a miniature of the segment's footage (sage = the kept window,
+/// dim = what's out, one live playhead) over a two-option PICKER — "✨ Best part" (Vela's pick,
+/// default) vs "Full clip". The highlighted side is what a keep-swipe commits; there is no other
+/// trim state or action anywhere on the card. The card plays the full footage either way.
+private struct TrimFootageBar: View {
+    let segment: Segment
+    let keepsFullClip: Bool
+    /// Whether the inline player is running (the playhead only shows then).
+    let live: Bool
+    let clock: PlaybackClock
+    /// The picker changed (true = full clip).
+    let onSelect: (Bool) -> Void
+
+    /// One-time coach line on the first trimmed card a user EVER sees (per install), then never again.
+    @AppStorage("velaTrimCoachShown") private var coachShown = false
+    @State private var showCoach = false
+
+    /// Fraction of the segment Vela keeps (trim point as 0…1 of the full span).
+    private var trimFraction: CGFloat {
+        let full = segment.endSeconds - segment.startSeconds
+        guard full > 0, let t = segment.trimToSeconds else { return 1 }
+        return CGFloat(max(0, min(1, (t - segment.startSeconds) / full)))
+    }
+    /// Current playback position as 0…1 of the full span (reads the clock → 10Hz re-render of this
+    /// strip only).
+    private var playFraction: CGFloat {
+        let full = segment.endSeconds - segment.startSeconds
+        guard full > 0 else { return 0 }
+        return CGFloat(max(0, min(1, (clock.seconds - segment.startSeconds) / full)))
+    }
+
+    private var fullText: String { fmtDur(segment.endSeconds - segment.startSeconds) }
+    private var keptText: String {
+        fmtDur((segment.trimToSeconds ?? segment.endSeconds) - segment.startSeconds)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            bar
+            if showCoach {
+                Text("Vela picked the best \(keptText) of this clip. Tap Full clip to keep everything.")
+                    .font(VeFont.sans(11.5))
+                    .foregroundStyle(Color.veNoteText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .transition(.opacity)
+            }
+            picker
+        }
+        .onAppear(perform: startCoach)
+    }
+
+    /// The footage strip: sage kept window, dim remainder (the boundary IS the cut point), and the
+    /// single live playhead gliding with playback. Picking "Full clip" floods the strip sage.
+    private var bar: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.veFaintGray.opacity(0.35))
+                Capsule()
+                    .fill(Color.veSage)
+                    .frame(width: max(6, keepsFullClip ? w : w * trimFraction))
+                if live {
+                    RoundedRectangle(cornerRadius: 1.25, style: .continuous)
+                        .fill(Color.veCharcoal.opacity(0.75))
+                        .frame(width: 2.5, height: 14)
+                        .offset(x: max(0, min(w - 2.5, w * playFraction - 1.25)))
+                }
+            }
+        }
+        .frame(height: 9)
+        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: keepsFullClip)
+    }
+
+    /// The ONLY trim control: two equal options, the highlighted one is what you keep.
+    private var picker: some View {
+        HStack(spacing: 4) {
+            segmentButton(selected: !keepsFullClip, icon: "wand.and.stars",
+                          label: "Best part · \(keptText)") { choose(false) }
+            segmentButton(selected: keepsFullClip, icon: nil,
+                          label: "Full clip · \(fullText)") { choose(true) }
+        }
+        .padding(3)
+        .background(Color.veNote, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+    }
+
+    private func segmentButton(selected: Bool, icon: String?, label: String,
+                               action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                if let icon { Image(systemName: icon).font(.system(size: 10, weight: .bold)) }
+                Text(label)
+                    .font(VeFont.sans(11.5, weight: .bold))
+                    .lineLimit(1).minimumScaleFactor(0.8)
+            }
+            .foregroundStyle(selected ? .white : Color.veNoteText)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 7)
+            .background(selected ? Color.veSage : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 8.5, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func choose(_ full: Bool) {
+        dismissCoach()
+        onSelect(full)
+    }
+
+    /// Show the coach line exactly once per install: flag flips immediately on first appearance so
+    /// no other card can show it; the line itself fades out after ~6s or on first picker tap.
+    private func startCoach() {
+        guard !coachShown else { return }
+        coachShown = true
+        withAnimation(.easeIn(duration: 0.25)) { showCoach = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { dismissCoach() }
+    }
+
+    private func dismissCoach() {
+        guard showCoach else { return }
+        withAnimation(.easeOut(duration: 0.3)) { showCoach = false }
+    }
+}
+
+// MARK: - Trim dim overlay (wordless WYSIWYG)
+
+/// While the loop plays footage that won't be included ("Best part" selected), the video gently
+/// dims with a small ✂ — bright = in your video, dimmed = out. No text, no pill; the footage
+/// itself previews the cut. Reads the clock in its own body so the 10Hz ticks re-render only this
+/// overlay, never the whole card. Never shown when "Full clip" is selected (nothing gets trimmed)
+/// or while the player is paused/off.
+private struct TrimDimOverlay: View {
+    let segment: Segment
+    let keepsFullClip: Bool
+    let live: Bool
+    let clock: PlaybackClock
+
+    private var dimmed: Bool {
+        guard live, !keepsFullClip, let t = segment.trimToSeconds else { return false }
+        return clock.seconds >= t
+    }
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Color.black.opacity(dimmed ? 0.35 : 0)
+            Image(systemName: "scissors")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.white.opacity(0.9))
+                .shadow(color: .black.opacity(0.3), radius: 3, y: 1)
+                .padding(12)
+                .opacity(dimmed ? 1 : 0)
+        }
+        .animation(.easeInOut(duration: 0.25), value: dimmed)
+        .allowsHitTesting(false)
+    }
 }

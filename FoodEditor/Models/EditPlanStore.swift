@@ -385,6 +385,44 @@ final class EditPlanStore {
         if !order.contains(where: { $0.sourceSegmentId == id }) { order.append(makeClip(id)) }
     }
 
+    /// Sort's keep commit — the card's footage-bar toggle decides the kept window: Vela's trim
+    /// (`makeClip` bounds) or the segment's FULL bounds. The window change ripples the overlay lane
+    /// (a mid-spine clip growing/shrinking shifts everything after it).
+    func keep(_ id: Int, fullClip: Bool) {
+        keep(id)
+        withRippledLane { setKeepWindow(id, fullClip: fullClip) }
+    }
+
+    /// Hook variant of the Sort keep commit (a hook is a keep with a crown).
+    func setHook(_ id: Int, fullClip: Bool) {
+        setHook(id)
+        withRippledLane { setKeepWindow(id, fullClip: fullClip) }
+    }
+
+    /// Apply the Sort toggle to the segment's single spine instance. `fullClip` stretches it to the
+    /// segment's full bounds (overriding the AI trim). `fullClip == false` shrinks it back to the AI
+    /// trim ONLY when it currently spans the exact full bounds (undoing a previous toggle) — a custom
+    /// trim the creator made on Polish is never clobbered. A split clip (multiple instances) is left
+    /// alone entirely: their edit wins.
+    private func setKeepWindow(_ id: Int, fullClip: Bool) {
+        guard let s = segmentsById[id] else { return }
+        let instances = order.indices.filter { order[$0].sourceSegmentId == id }
+        guard instances.count == 1, let i = instances.first else { return }
+        if fullClip {
+            order[i].inPoint = s.startSeconds
+            order[i].outPoint = s.endSeconds
+        } else {
+            let isFullSpan = abs(order[i].inPoint - s.startSeconds) < 0.05
+                && abs(order[i].outPoint - s.endSeconds) < 0.05
+            if isFullSpan {
+                let ai = makeClip(id)
+                order[i].inPoint = ai.inPoint
+                order[i].outPoint = ai.outPoint
+            }
+        }
+        clampNarrationIntoBounds()
+    }
+
     // MARK: - Imported clips (post-analysis append, no Gemini)
 
     /// Next free segment id — synthetic imported segments take ids above every existing one.
@@ -472,18 +510,10 @@ final class EditPlanStore {
         order.insert(clip, at: max(0, min(index, order.count)))
     }
 
-    /// Set a clip's effective source duration (end trim), clamped to the raw segment's real length.
-    func setSourceDuration(_ cid: UUID, seconds: Double) {
-        guard let i = clipIndex(cid), let s = segmentsById[order[i].sourceSegmentId] else { return }
-        let maxLen = s.endSeconds - s.startSeconds
-        let clamped = max(0.5, min(seconds, maxLen))
-        order[i].outPoint = order[i].inPoint + clamped
-        clampNarrationIntoBounds()
-    }
-
-    /// Frame-accurate two-edge trim on a base clip, clamped to the segment's real source bounds. Unlike
-    /// `setSourceDuration` these let the in-point move and can grow a clip back toward the AI's bounds.
-    /// (These change `baseDuration` without rippling, so the narration clamp runs here too.)
+    /// Frame-accurate two-edge trim on a base clip, clamped to the segment's real source bounds — the
+    /// in-point can move, and a clip can grow back toward the AI's full bounds (this is how hidden
+    /// trimmed footage is recovered on Polish). (These change `baseDuration` without rippling, so the
+    /// narration clamp runs here too.)
     func setIn(_ cid: UUID, toSource newIn: Double) {
         guard let i = clipIndex(cid), let s = segmentsById[order[i].sourceSegmentId] else { return }
         let snapped = (newIn * 30).rounded() / 30

@@ -193,6 +193,14 @@ struct Segment: Codable, Identifiable, Equatable {
 
     /// True when the AI was unsure enough that the doc says we should flag for review (~0.7).
     var isLowConfidence: Bool { confidence < 0.7 }
+
+    /// True when the AI suggested trimming this segment's tail — a valid `trim_to_seconds` strictly
+    /// inside the segment with a meaningful remainder (≥ 0.5s; smaller trims are timestamp noise).
+    /// Drives the Sort card's footage bar + "full clip" keep toggle.
+    var hasTrim: Bool {
+        guard let t = trimToSeconds else { return false }
+        return t > startSeconds + 0.05 && t < endSeconds - 0.5
+    }
 }
 
 // MARK: - B-roll placement
