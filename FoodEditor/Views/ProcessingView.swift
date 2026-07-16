@@ -29,9 +29,11 @@ struct ProcessingView: View {
     }
 
     /// B-roll coverage seeding cap: the brief's lean wins, else the active template's learned heaviness,
-    /// else a sane default. Makes the "Lean on b-roll" choice tangibly change how much overlay is placed.
+    /// else a sane default. Relative leans (More me / More food) resolve AGAINST the learned heaviness;
+    /// "My usual" returns nil and falls through to it. Makes the b-roll choice tangibly change the cut.
     private var brollCoverageTarget: Double {
-        session.brief?.brollLean.coverageTarget ?? templates.active?.profile.broll.heaviness ?? 0.25
+        let usual = templates.active?.profile.broll.heaviness
+        return session.brief?.brollLean.resolvedTarget(styleHeaviness: usual) ?? usual ?? 0.25
     }
 
     var body: some View {

@@ -55,16 +55,49 @@ export function adaptToEditPlan(index, decisions) {
     edit_note: noteById.has(s.id) ? (noteById.get(s.id).note ?? "") : "",
     section: s.section ?? "unknown",
     topic: s.topic ?? "",
+    reaction_kind: s.reaction_kind ?? "none",
   }));
 
-  // ---- broll_placements: shot ids ARE segment ids; relative offset copies through (no math) ----
-  const broll_placements = broll.map((p) => ({
-    over_segment_id: p.over_shot_id,
-    broll_segment_id: p.broll_shot_id,
-    start_offset_seconds: p.start_offset_seconds,
-    duration_seconds: p.duration_seconds,
-    reason: p.reason ?? null,
-  }));
+  // ---- broll_placements: shot ids ARE segment ids; relative offset copies through (no math).
+  // Reaction gate (mirrors EditPlanAdapter.swift + ReactionKind.minCoverOffset): a bite / the verdict is
+  // NEVER covered (drop); a first_taste / peak_reaction keeps its ~3s peak face-on — clamp the offset up,
+  // shrink the duration to the kept window, and drop only when nothing ≥1.5s fits.
+  const minCoverOffset = (kind) => {
+    if (kind === "bite" || kind === "verdict") return null;
+    if (kind === "first_taste" || kind === "peak_reaction") return 3.0;
+    return 0;
+  };
+  const fmt = (x) => Number(x).toFixed(1);
+  const broll_placements = broll.flatMap((p) => {
+    let offset = p.start_offset_seconds;
+    let duration = p.duration_seconds;
+    const over = byId.get(p.over_shot_id);
+    if (over) {
+      const minOffset = minCoverOffset(over.reaction_kind ?? "none");
+      if (minOffset === null) {
+        warnings.push(`dropped b-roll over shot ${p.over_shot_id} — it's a ${over.reaction_kind} reaction (never-cover)`);
+        return [];
+      }
+      if (offset < minOffset) {
+        const t = trimById.get(p.over_shot_id)?.trim_to_seconds;
+        const end = (t != null && t > over.start_seconds + 0.05 && t < over.end_seconds - 0.05) ? t : over.end_seconds;
+        warnings.push(`clamped b-roll over shot ${p.over_shot_id} — ${over.reaction_kind} peak stays face-on (offset ${fmt(offset)} → ${fmt(minOffset)})`);
+        offset = minOffset;
+        duration = Math.min(duration, (end - over.start_seconds) - offset);
+        if (duration < 1.5) {
+          warnings.push(`dropped b-roll over shot ${p.over_shot_id} — too short (${fmt(end - over.start_seconds)}s kept) for the ≥${fmt(minOffset)}s peak clamp`);
+          return [];
+        }
+      }
+    }
+    return [{
+      over_segment_id: p.over_shot_id,
+      broll_segment_id: p.broll_shot_id,
+      start_offset_seconds: offset,
+      duration_seconds: duration,
+      reason: p.reason ?? null,
+    }];
+  });
 
   const plan = {
     video_summary: decisions.video_summary || index.video_summary || "",

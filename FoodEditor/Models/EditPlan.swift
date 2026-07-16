@@ -107,6 +107,10 @@ struct Segment: Codable, Identifiable, Equatable {
     /// the model omits it or an older saved plan predates the field — grouping then no-ops (see
     /// `TopicGrouping`).
     let topic: String
+    /// The PERCEIVE shot's payoff moment, carried through ADAPT so the b-roll cover policy
+    /// (`ReactionKind.minCoverOffset`) can be enforced at seed time too. `.none` for the monolith
+    /// pipeline and for older saved plans that predate the field — the clamp then no-ops.
+    let reactionKind: ReactionKind
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -123,6 +127,7 @@ struct Segment: Codable, Identifiable, Equatable {
         case editNote = "edit_note"
         case section
         case topic
+        case reactionKind = "reaction_kind"
     }
 
     init(from decoder: Decoder) throws {
@@ -141,13 +146,14 @@ struct Segment: Codable, Identifiable, Equatable {
         editNote           = (try? c.decode(String.self, forKey: .editNote)) ?? ""
         section            = (try? c.decode(VideoSection.self, forKey: .section)) ?? .unknown
         topic              = (try? c.decode(String.self, forKey: .topic)) ?? ""
+        reactionKind       = (try? c.decode(ReactionKind.self, forKey: .reactionKind)) ?? ReactionKind.none
     }
 
     /// Memberwise initializer kept for previews / tests.
     init(id: Int, startSeconds: Double, endSeconds: Double, sceneType: SceneType,
          description: String, hookScore: Double, keep: Bool, trimToSeconds: Double?,
          voiceoverCandidate: Bool, voiceoverReason: String?, confidence: Double, editNote: String,
-         section: VideoSection = .unknown, topic: String = "") {
+         section: VideoSection = .unknown, topic: String = "", reactionKind: ReactionKind = .none) {
         self.id = id
         self.startSeconds = startSeconds
         self.endSeconds = endSeconds
@@ -162,6 +168,7 @@ struct Segment: Codable, Identifiable, Equatable {
         self.editNote = editNote
         self.section = section
         self.topic = topic
+        self.reactionKind = reactionKind
     }
 
     /// A synthetic segment for a camera-roll clip appended AFTER analysis (no Gemini). Covers the clip's
@@ -189,6 +196,7 @@ struct Segment: Codable, Identifiable, Equatable {
         try c.encode(editNote, forKey: .editNote)
         try c.encode(section, forKey: .section)
         try c.encode(topic, forKey: .topic)
+        try c.encode(reactionKind, forKey: .reactionKind)
     }
 
     /// True when the AI was unsure enough that the doc says we should flag for review (~0.7).
@@ -201,6 +209,11 @@ struct Segment: Codable, Identifiable, Equatable {
         guard let t = trimToSeconds else { return false }
         return t > startSeconds + 0.05 && t < endSeconds - 0.5
     }
+
+    /// Whether this segment can serve as a b-roll SOURCE — any visual, non-talking shot (the ONE
+    /// eligibility definition, niche-agnostic; matches the DECIDE prompt's "a VISUAL, non-talking
+    /// shot" rule). `.unknown` excluded: it's imported clips and synthetic gap-filler, not coverage.
+    var isBrollSource: Bool { sceneType != .talkingHead && sceneType != .unknown }
 }
 
 // MARK: - B-roll placement

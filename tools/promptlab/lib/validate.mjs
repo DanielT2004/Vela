@@ -76,7 +76,11 @@ export function validatePlan(plan, proxyDuration = 0) {
 
   // b-roll legality (mirrors EditPlanStore.seededLane's silent filters)
   const placements = Array.isArray(plan.broll_placements) ? plan.broll_placements : [];
+  const seenBrollSources = new Set();
   for (const p of placements) {
+    if (seenBrollSources.has(p.broll_segment_id))
+      add("brollDuplicateSource", "medium", `b-roll source segment ${p.broll_segment_id} is used more than once (identical frames replay)`, p.broll_segment_id);
+    seenBrollSources.add(p.broll_segment_id);
     const over = byId.get(p.over_segment_id);
     if (!over) add("brollOverMissing", "high", `b-roll over_segment_id ${p.over_segment_id} doesn't exist`, p.over_segment_id);
     else {
@@ -104,5 +108,15 @@ export function validatePlan(plan, proxyDuration = 0) {
     .map(([k, n]) => `${k}×${n}`).sort().join(", ");
   const summary = v.length ? `score ${fmt(score)} — ${v.length} violation(s): ${tally}` : `Plan valid — ${segs.length} segments, score 1.00`;
 
-  return { score, violations: v, summary, segmentCount: segs.length, keptCount: kept, coverageSeconds: coverage, proxyDuration };
+  // Planned b-roll coverage — overlay seconds ÷ KEPT talking-on-camera seconds (trims respected);
+  // mirrors EditPlanValidator.plannedBrollPct (same denominator as the style target + seeding cap).
+  const keptTalking = segs.filter((s) => s.keep !== false && s.scene_type === "talking-head").reduce((acc, s) => {
+    const t = s.trim_to_seconds;
+    const end = (t != null && t > s.start_seconds && t <= s.end_seconds + TOL) ? Math.min(t, s.end_seconds) : s.end_seconds;
+    return acc + Math.max(0, end - s.start_seconds);
+  }, 0);
+  const overlaySeconds = (plan.broll_placements || []).reduce((acc, p) => acc + Math.max(0, p.duration_seconds || 0), 0);
+  const plannedBrollPct = keptTalking > 0 ? overlaySeconds / keptTalking : 0;
+
+  return { score, violations: v, summary, segmentCount: segs.length, keptCount: kept, coverageSeconds: coverage, proxyDuration, plannedBrollPct };
 }

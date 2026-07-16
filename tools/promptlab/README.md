@@ -44,6 +44,8 @@ duration_discipline (each 1–5, justifications must cite segment ids) · overal
 
 ## Keep in lockstep with the app
 - `lib/validate.mjs` mirrors `FoodEditor/Models/EditPlanValidator.swift`
+- `adapt-plan.mjs` mirrors `FoodEditor/Models/EditPlanAdapter.swift` (incl. the b-roll reaction gate / ≥3s peak clamp) — no automated guard; if you touch one, touch both
+- `prompts/decide.txt` mirrors `DecidePrompt.body` — no automated guard; if you touch one, touch both
 - `schema.json` mirrors `GeminiService.responseSchema`
 - `prompts/baseline.txt` mirrors `GeminiPrompt.editPlan`
 - `prompts/style-v2.txt` mirrors `GeminiPrompt.styleProfile` — run-style-extract.mjs HARD-FAILS on drift (re-extract with the awk one-liner in git history)

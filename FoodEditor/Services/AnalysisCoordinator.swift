@@ -361,9 +361,14 @@ final class AnalysisCoordinator {
         if !repairActions.isEmpty {
             Log.gemini("Plan validation (shipped, after repair) — \(validation.summary)")
         }
+        // Style conformance in one line: planned coverage vs the creator's target (same talking-time
+        // denominator on both sides), so an under-covering run is visible in the console + eval bundle.
+        Log.gemini(String(format: "Planned b-roll — %.0f%% of kept talking time covered (target %.0f%%)",
+                          validation.plannedBrollPct * 100, brollCoverageTarget * 100))
         if let bundle {
             EvalArtifactStore.attachPlan(bundle: bundle, plan: plan, validation: validation,
-                                         aiValidation: aiValidation, repairActions: repairActions)
+                                         aiValidation: aiValidation, repairActions: repairActions,
+                                         brollTargetPct: brollCoverageTarget)
         }
 
         let store = EditPlanStore(plan: plan, brollCoverageTarget: brollCoverageTarget, spineIsVerbatim: spineIsVerbatim)

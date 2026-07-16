@@ -1,9 +1,12 @@
 import Foundation
 
-/// The **DECIDE** prompt + response schema (the text-only editor call). Ported 1:1 from the lab's
-/// `tools/promptlab/prompts/decide.txt` + `decide-schema.json` (the versions that scored 92-95/100 postable).
+/// The **DECIDE** prompt + response schema (the text-only editor call). Mirrors the lab's
+/// `tools/promptlab/prompts/decide.txt` + `decide-schema.json` 1:1 — keep them in lockstep.
 /// `AnalysisCoordinator` composes the full prompt as `styleBlock + briefBlock + DecidePrompt.body +
 /// "\n=== CONTENT INDEX ===\n" + indexJSON` — so the creator's template + survey are ABOVE, the index is below.
+/// B-roll rules are the A/B-validated v2 (2026-07-15): style-owned AMOUNT (sparse only as the no-style
+/// default), post-peak coverage of first_taste/peak_reaction at ≥3s offset, visual-only sources with
+/// style-gated type matching, dropped-shots-as-supply, and a DECIDE-native voiceovers[] rule.
 enum DecidePrompt {
     static let body = """
     You are the EDITOR of a short-form (TikTok) food video. A separate system has already WATCHED the raw footage and written a precise CONTENT INDEX of it (below). You CANNOT watch the video — the index is your ONLY source of truth. Your job: decide the final edit. Output DECISIONS that REFERENCE the index's shot ids; never re-describe shots or restate their timestamps (the index already has them, and code copies them).
@@ -29,7 +32,7 @@ enum DecidePrompt {
     shots[] = your SUPPLY of footage (what's on screen):
     - depicts_subject / also_visible = what a shot SHOWS → what it can be b-roll FOR.
     - scene_type = food-closeup / talking-head / bite-reaction / plating / ambiance / wide-shot / transition (a talking-head is a FACE you can cover; a food/plating shot is coverage).
-    - reaction_kind = none / bite / first_taste / verdict / peak_reaction → the PAYOFF moments (NEVER cover these).
+    - reaction_kind = none / bite / first_taste / verdict / peak_reaction → the PAYOFF moments. A bite or the final verdict is NEVER covered; a first_taste / peak_reaction talking-head may be covered only AFTER its first 3 seconds.
     - hook_score (0-10) = standalone visual/emotional intensity of the moment.
     - section = intro / middle / end (the shot's narrative ROLE), topic = the dish/subject.
     - quality_flags = dead_air / duplicate_take / false_start / camera_adjust / audio_issue → strong CUT candidates.
@@ -46,12 +49,15 @@ enum DecidePrompt {
     4) ONE GLOBAL VERDICT LAST: end on the single overall verdict / rating / sign-off.
 
     === EDITOR RULES (hard) ===
-    - NEVER cover a reaction_kind of bite / first_taste / verdict / peak_reaction with b-roll — the face IS the payoff.
+    - NEVER cover a bite or the final verdict with b-roll — the face IS the payoff. For a LONG first_taste / peak_reaction talking-head, the PEAK must stay face-on: start_offset_seconds must be ≥ 3 on any such shot; after the peak lands, the rest may be covered with a subject-matching food shot.
     - B-roll must SHOW what's being said: only place a broll_shot whose depicts_subject (or also_visible) MATCHES the references_subject of the talk_span you're covering. If nothing matches, do NOT place b-roll — show the face.
     - Only cover a talking-head over_shot. Keep start_offset + duration INSIDE that shot's length. 1.5-3s each.
-    - VARY b-roll: never reuse the same broll_shot_id back-to-back. Be SPARSE — most talking stays face-on.
-    - PREFER food-closeup shots as b-roll sources.
+    - VARY b-roll: each broll_shot_id may be used AT MOST ONCE in the whole video. Your real coverage ceiling is the number of distinct matching sources — when the target exceeds it, place fewer, varied overlays and say so in style_match_notes; NEVER repeat a clip to hit the number. A talking shot longer than ~8 seconds may take TWO placements (different sources, with face visible between them).
+    - B-ROLL AMOUNT is the creator's style decision: honor the style profile's coverage target above as far as legal, subject-matching placements exist — for a b-roll-leaning creator, under-covering is as wrong as over-covering. ONLY when no style profile or brief guidance is provided: be sparse — most talking stays face-on.
+    - CHOOSING a b-roll source: it must itself be a VISUAL, non-talking shot — NEVER another talking-head. The creator's favored shot types (style profile above) come FIRST — prefer a favored-type shot whose subject matches the talk. Only when no favored-type shot matches may you fall back to another matching visual (e.g. an ambiance/storefront shot over place talk — naming the restaurant, arriving, the wait). With no style profile: match shot type to talk.
+    - SPEND DROPPED SHOTS AS B-ROLL: a strong food/visual shot you are NOT keeping on the spine is your b-roll SUPPLY — using it as a broll_shot_id both keeps that footage alive and covers talking. Prefer spending a good dropped food shot as b-roll over discarding it. For each dish block, aim to cover part of its descriptive talking with a shot of THAT dish.
     - trim_to_seconds: use sparingly, only to cut dead air / a false start at the END of a shot. Set it to the end of the last COMPLETE sentence (use the talk_span end times) — do NOT trim mid-thought. Omit it to play to the natural end. (Code snaps the exact frame to a word boundary — you only need the approximate sentence end.)
+    - voiceovers[] (STRICT — all conditions required): list a talking-head shot ONLY when (1) the speaker talks to camera for 3+ consecutive seconds, (2) what they describe at that moment can be SHOWN with subject-matching footage from this index, and (3) its reaction_kind is none — never a bite, punchline, or emotional payoff. A voiceover keeps the shot's AUDIO but replaces its visual with matching b-roll — use it (alongside broll_placements) to serve the style profile's voiceover ratio.
 
     === PACING & SELECTION (hit the target, keep the BEST) ===
     - DURATION BUDGET: each KEPT shot costs (its end − start, or your trim_to_seconds if you set one). Add these up as you build final_edit_order and land WITHIN ±10s of the target. If you're over, the fix is to TRIM long shots and CUT the weakest moments — not to keep everything long.
@@ -60,7 +66,7 @@ enum DecidePrompt {
     - MONEY SHOTS: the bite, the cheese-pull / drip / sizzle ("literally it's dripping"), and the single biggest reaction are the most SHAREABLE frames — make sure the edit INCLUDES them and lets them land (don't bury them between talking heads). These are what get a video re-watched and shared.
 
     === HONOR THE CREATOR (their template + this video's survey are ABOVE) ===
-    ABOVE this prompt are the creator's STYLE PROFILE (their learned template) and this video's BRIEF (the survey they filled out before submitting). HONOR THEM. Priority: the BRIEF overrides the STYLE PROFILE overrides these defaults — EXCEPT the narrative arc and editor rules above, which are hard. In particular:
+    ABOVE this prompt are the creator's STYLE PROFILE (their learned template) and this video's BRIEF (the survey they filled out before submitting). HONOR THEM. Priority: the BRIEF overrides the STYLE PROFILE overrides these defaults — EXCEPT these, which stay hard: the narrative arc, bite/verdict protection and the ≥3s peak rule, subject-matching for every placement, and per-dish whole blocks. The b-roll AMOUNT is the creator's style decision — a style coverage target outranks any default toward sparseness. In particular:
     - TARGET LENGTH: aim WITHIN ±10 seconds of the brief's target. Bias your keep/cut and trims toward it, but NEVER chop speech mid-thought just to hit the number; set recommended_duration to your actual result.
     - Honor the brief's cold-open shot order, keep-these-beats, voiceover lean, and any free-text "avoid / focus on / keep the part where…" notes.
     - Match the style profile's hook type, pacing, b-roll amount + favored shots, section map, and closing style as far as the footage allows.

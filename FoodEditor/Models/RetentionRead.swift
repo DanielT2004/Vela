@@ -115,6 +115,11 @@ struct RetentionRead {
     let payoff: Payoff
     let payoffFraction: Double? // 0…1 position on the strip; nil when absent
     let broll: Broll
+    /// The creator EXPLICITLY asked for a high b-roll target (More food / Mostly food) and the cut
+    /// landed under half of it — footage-bound, not a miss, and worth saying in their terms so the
+    /// override never reads as ignored. All real fields: the lean choice, the resolved target, and
+    /// the lane's actual coverage of kept talking time.
+    let brollAskShortfall: Bool
     let secondsTrimmed: Int
 
     let introKept: Int
@@ -125,7 +130,7 @@ struct RetentionRead {
 
     // MARK: - Derivation (all from real fields)
 
-    init(plan: EditPlan, store: EditPlanStore) {
+    init(plan: EditPlan, store: EditPlanStore, brief: EditBrief? = nil) {
         let total = store.totalDuration
         totalDuration = total
         targetDuration = plan.recommendedDuration
@@ -171,11 +176,23 @@ struct RetentionRead {
         }
 
         // B-roll coverage → band (never a rendered %).
-        let cover = total > 0 ? min(1, store.brollLane.reduce(0) { $0 + $1.duration } / total) : 0
+        let laneSeconds = store.brollLane.reduce(0) { $0 + $1.duration }
+        let cover = total > 0 ? min(1, laneSeconds / total) : 0
         if store.brollLane.isEmpty || cover <= 0.001 { broll = .none }
         else if cover < 0.15                          { broll = .light }
         else if cover < 0.40                          { broll = .moderate }
         else                                          { broll = .heavy }
+
+        // Override-aware shortfall — the creator asked HIGH (More food / Mostly food) but the cut landed
+        // under HALF the resolved ask. Coverage measured over kept TALKING time (the target's own
+        // denominator), so the comparison is apples-to-apples.
+        let askedHeavy = brief?.brollLean == .moreFood || brief?.brollLean == .brollHeavy
+        let keptTalking = store.order.reduce(0.0) { acc, c in
+            (store.segment(c.sourceSegmentId)?.sceneType == .talkingHead) ? acc + c.timelineDuration : acc
+        }
+        let talkCover = keptTalking > 0 ? laneSeconds / keptTalking : 0
+        brollAskShortfall = askedHeavy && store.brollCoverageTarget > 0
+            && talkCover < store.brollCoverageTarget * 0.5
 
         // Real seconds trimmed away from kept spine clips (source full length − used slice). No inflation.
         var trimmed = 0.0

@@ -15,6 +15,19 @@ enum ReactionKind: String, Codable, Equatable {
         let raw = (try? decoder.singleValueContainer().decode(String.self)) ?? ""
         self = ReactionKind(rawValue: raw) ?? .none
     }
+
+    /// The b-roll COVER POLICY for a talking shot with this reaction — the ONE place the rule lives
+    /// (consumed by `EditPlanAdapter`'s gate AND `EditPlanStore.seededLane`'s clamp; mirrored in
+    /// `tools/promptlab/adapt-plan.mjs`). `nil` = NEVER coverable (a bite / the verdict IS the payoff);
+    /// otherwise the minimum `start_offset_seconds` — a first_taste / peak_reaction keeps its first
+    /// ~3s peak face-on, then the descriptive tail may be covered. Matches the DECIDE prompt's R3 rule.
+    var minCoverOffset: Double? {
+        switch self {
+        case .bite, .verdict:            return nil
+        case .firstTaste, .peakReaction: return 3.0
+        case .none:                      return 0
+        }
+    }
 }
 
 /// One continuous visual on screen (the SUPPLY side). 1:1 with the app's `Segment` — same `id`/timestamps/

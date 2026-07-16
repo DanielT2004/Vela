@@ -32,6 +32,7 @@ enum EditPlanValidator {
             case brollSourceIsTalkingHead// source is a talking-head (would cover a face with a face)
             case brollSameAsOver         // source == over (covering a clip with itself)
             case brollWindowOutOfRange   // offset/duration falls outside the over-segment window
+            case brollDuplicateSource    // the same source used by more than one placement (identical frames replay)
         }
         let kind: Kind
         let severity: String   // "high" | "medium" | "low"
@@ -48,6 +49,10 @@ enum EditPlanValidator {
         let keptCount: Int
         let coverageSeconds: Double  // union of segment spans actually covered
         let proxyDuration: Double    // 0 when unknown (e.g. a resumed run with no metadata)
+        /// Planned b-roll coverage — overlay seconds ÷ KEPT talking-on-camera seconds (trims respected);
+        /// 0 when no talking is kept. Same denominator as the style block's coverage target and the
+        /// seeding cap, so style conformance is one comparison. Additive key in validation.json.
+        let plannedBrollPct: Double
     }
 
     /// Seconds of slop we tolerate before calling something a gap/overlap/over-length. Gemini's timestamps
@@ -134,7 +139,12 @@ enum EditPlanValidator {
         }
 
         // MARK: b-roll legality (mirrors EditPlanStore.seededLane's silent filters)
+        var seenBrollSources = Set<Int>()
         for p in plan.brollPlacements {
+            if !seenBrollSources.insert(p.brollSegmentId).inserted {
+                v.append(.init(kind: .brollDuplicateSource, severity: "medium",
+                               detail: "b-roll source segment \(p.brollSegmentId) is used more than once (identical frames replay)", segmentId: p.brollSegmentId))
+            }
             let over = byId[p.overSegmentId]
             if over == nil {
                 v.append(.init(kind: .brollOverMissing, severity: "high",
@@ -190,9 +200,20 @@ enum EditPlanValidator {
             ? "Plan valid — \(segs.count) segments, score 1.00"
             : "score \(fmt(score)) — \(v.count) violation(s): " + tally(v)
 
+        // MARK: planned b-roll coverage — the A/B metric: overlay seconds over KEPT talking-on-camera
+        // seconds. Each talking segment counts its kept window (a valid trim shortens it); placements
+        // count their raw durations (legality issues are flagged above, not re-litigated here).
+        let keptTalking = segs.filter { $0.keep && $0.sceneType == .talkingHead }.reduce(0.0) { acc, s in
+            let end = (s.trimToSeconds.flatMap { $0 > s.startSeconds && $0 <= s.endSeconds + tol ? min($0, s.endSeconds) : nil }) ?? s.endSeconds
+            return acc + max(0, end - s.startSeconds)
+        }
+        let overlaySeconds = plan.brollPlacements.reduce(0.0) { $0 + max(0, $1.durationSeconds) }
+        let plannedBrollPct = keptTalking > 0 ? overlaySeconds / keptTalking : 0
+
         return Report(score: score, violations: v, summary: summary,
                       segmentCount: segs.count, keptCount: kept,
-                      coverageSeconds: coverage, proxyDuration: proxyDuration)
+                      coverageSeconds: coverage, proxyDuration: proxyDuration,
+                      plannedBrollPct: plannedBrollPct)
     }
 
     // MARK: helpers
@@ -228,6 +249,8 @@ extension EditPlanValidator {
             broll: [broll(over: 1, source: 2, offset: 1, dur: 2)])
         let rc = validate(clean, proxyDuration: 15)
         expect(rc.violations.isEmpty && rc.score == 1.0, "clean fixture should be empty/1.0, got \(rc.summary)")
+        // Kept talking = seg 1 (5s) + seg 3 (5s) = 10s; one 2s placement → 20% planned coverage.
+        expect(abs(rc.plannedBrollPct - 0.2) < 0.001, "clean fixture plannedBrollPct should be 0.2, got \(rc.plannedBrollPct)")
 
         // DIRTY — exactly three breaks: a 16s segment, a 0.5s gap before seg 3, and an order id (2) cut.
         let dirty = makePlan(
@@ -247,6 +270,19 @@ extension EditPlanValidator {
         let empty = makePlan(segments: [], order: [], broll: [])
         let re = validate(empty, proxyDuration: 0)
         expect(re.segmentCount == 0, "empty fixture should report 0 segments")
+
+        // DUPLICATE SOURCE — the same b-roll source on two placements → exactly one brollDuplicateSource.
+        let dup = makePlan(
+            segments: [
+                seg(1, 0, 5, .talkingHead, keep: true, section: .intro),
+                seg(2, 5, 10, .foodCloseup, keep: true, section: .middle),
+                seg(3, 10, 15, .talkingHead, keep: true, section: .end),
+            ],
+            order: [1, 2, 3],
+            broll: [broll(over: 1, source: 2, offset: 1, dur: 2), broll(over: 3, source: 2, offset: 1, dur: 2)])
+        let rdup = validate(dup, proxyDuration: 15)
+        expect(rdup.violations.filter { $0.kind == .brollDuplicateSource }.count == 1,
+               "dup fixture should flag exactly one brollDuplicateSource, got \(rdup.summary)")
 
         Log.app(ok ? "✅ EditPlanValidator.selfCheck passed (clean/dirty/empty)"
                    : "❌ EditPlanValidator.selfCheck FAILED — see ❌ lines above")

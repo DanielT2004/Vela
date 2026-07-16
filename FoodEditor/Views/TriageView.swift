@@ -235,7 +235,7 @@ struct TriageView: View {
         .sheet(isPresented: $showBreakdown) {
             if let store {
                 BreakdownSheet(store: store,
-                               read: RetentionRead(plan: store.plan, store: store),
+                               read: RetentionRead(plan: store.plan, store: store, brief: session.brief),
                                thumbs: thumbs, proxyURL: proxyURL)
                     .presentationDetents([.fraction(0.55), .large])
                     .presentationDragIndicator(.visible)

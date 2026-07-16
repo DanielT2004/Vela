@@ -100,9 +100,12 @@ enum EvalArtifactStore {
 
     /// After a successful parse + repair, drop the SHIPPED plan + its validation into the bundle, plus the
     /// AI's pre-repair score (`validation_ai.json`) so we keep measuring how often the model breaks rules,
-    /// and the list of b-roll repairs we applied (`repair.json`).
+    /// and the list of b-roll repairs we applied (`repair.json`). `brollTargetPct` (the resolved style/brief
+    /// coverage target) merges into meta.json so the bundle is self-contained for conformance tracking —
+    /// `validation.plannedBrollPct` vs `meta.brollTargetPct` is the one comparison that matters.
     static func attachPlan(bundle: URL, plan: EditPlan, validation: EditPlanValidator.Report,
-                           aiValidation: EditPlanValidator.Report? = nil, repairActions: [String] = []) {
+                           aiValidation: EditPlanValidator.Report? = nil, repairActions: [String] = [],
+                           brollTargetPct: Double? = nil) {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         if let d = try? enc.encode(plan) { try? d.write(to: bundle.appendingPathComponent("plan.json")) }
@@ -113,6 +116,14 @@ enum EvalArtifactStore {
         if !repairActions.isEmpty,
            let d = try? JSONSerialization.data(withJSONObject: ["brollRepairs": repairActions], options: [.prettyPrinted]) {
             try? d.write(to: bundle.appendingPathComponent("repair.json"))
+        }
+        if let brollTargetPct {
+            let metaURL = bundle.appendingPathComponent("meta.json")
+            if let data = try? Data(contentsOf: metaURL),
+               var meta = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                meta["brollTargetPct"] = brollTargetPct
+                writeJSON(meta, to: metaURL)
+            }
         }
     }
 

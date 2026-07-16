@@ -49,18 +49,35 @@ enum EditPlanAdapter {
                            description: s.description, hookScore: s.hookScore, keep: kept.contains(s.id),
                            trimToSeconds: clampTrim(trimById[s.id]?.trimToSeconds, start: s.startSeconds, end: s.endSeconds), voiceoverCandidate: vo != nil,
                            voiceoverReason: vo?.reason, confidence: s.confidence,
-                           editNote: noteById[s.id]?.note ?? "", section: s.section, topic: s.topic)
+                           editNote: noteById[s.id]?.note ?? "", section: s.section, topic: s.topic,
+                           reactionKind: s.reactionKind)
         }
 
         // ---- broll_placements: shot ids ARE segment ids; relative offset copies through (no math).
-        // DROP any b-roll over a reaction shot (bite/first_taste/verdict/peak_reaction) — the face is the payoff.
+        // Reaction gate (`ReactionKind.minCoverOffset` is the single policy source): a bite / the verdict
+        // is NEVER covered (drop); a first_taste / peak_reaction keeps its ~3s peak face-on — clamp the
+        // offset up, shrink the duration to the kept window, and drop only when nothing ≥1.5s fits.
         let placements = broll.compactMap { p -> BrollPlacement? in
-            if let over = byId[p.overShotId], over.reactionKind != .none {
-                warnings.append("dropped b-roll over shot \(p.overShotId) — it's a \(over.reactionKind.rawValue) reaction (never-cover)")
-                return nil
+            var offset = p.startOffsetSeconds
+            var duration = p.durationSeconds
+            if let over = byId[p.overShotId] {
+                guard let minOffset = over.reactionKind.minCoverOffset else {
+                    warnings.append("dropped b-roll over shot \(p.overShotId) — it's a \(over.reactionKind.rawValue) reaction (never-cover)")
+                    return nil
+                }
+                if offset < minOffset {
+                    let end = clampTrim(trimById[over.id]?.trimToSeconds, start: over.startSeconds, end: over.endSeconds) ?? over.endSeconds
+                    warnings.append("clamped b-roll over shot \(p.overShotId) — \(over.reactionKind.rawValue) peak stays face-on (offset \(fmt(offset)) → \(fmt(minOffset)))")
+                    offset = minOffset
+                    duration = min(duration, (end - over.startSeconds) - offset)
+                    guard duration >= 1.5 else {
+                        warnings.append("dropped b-roll over shot \(p.overShotId) — too short (\(fmt(end - over.startSeconds))s kept) for the ≥\(fmt(minOffset))s peak clamp")
+                        return nil
+                    }
+                }
             }
             return BrollPlacement(overSegmentId: p.overShotId, brollSegmentId: p.brollShotId,
-                                  startOffsetSeconds: p.startOffsetSeconds, durationSeconds: p.durationSeconds,
+                                  startOffsetSeconds: offset, durationSeconds: duration,
                                   reason: p.reason.isEmpty ? nil : p.reason)
         }
 
@@ -81,30 +98,52 @@ enum EditPlanAdapter {
         guard let trim, trim > start + 0.05, trim < end - 0.05 else { return nil }
         return trim
     }
+
+    private static func fmt(_ x: Double) -> String { String(format: "%.1f", x) }
 }
 
 #if DEBUG
 extension EditPlanAdapter {
     /// Self-check: a 2-shot index + decisions (order [0], b-roll over the talking-head ← the food shot) →
-    /// 2 segments, both kept (shot 1 is a b-roll source), one b-roll placement, zero warnings. Logs ✅/❌.
+    /// 2 segments, both kept (shot 1 is a b-roll source), one b-roll placement, zero warnings. Then the
+    /// reaction gate: a first_taste over-shot with an early offset → clamped to 3.0s (+ warning); a bite
+    /// over-shot → dropped. Logs ✅/❌.
     @discardableResult
     static func selfCheck() -> Bool {
-        func shot(_ id: Int, _ type: SceneType) -> Shot {
-            Shot(id: id, startSeconds: Double(id), endSeconds: Double(id) + 1, sceneType: type, description: "",
+        func shot(_ id: Int, _ type: SceneType, len: Double = 1, reaction: ReactionKind = .none) -> Shot {
+            Shot(id: id, startSeconds: Double(id) * 10, endSeconds: Double(id) * 10 + len, sceneType: type, description: "",
                  depictsSubject: type == .foodCloseup ? "Chicken Sandwich" : "", alsoVisible: [], hasSpeech: true,
-                 section: .middle, topic: "Chicken Sandwich", hookScore: 5, reactionKind: .none, qualityFlags: [], confidence: 1)
+                 section: .middle, topic: "Chicken Sandwich", hookScore: 5, reactionKind: reaction, qualityFlags: [], confidence: 1)
         }
+        func decisions(_ order: [Int], broll: [EditDecisions.BrollDecision]) -> EditDecisions {
+            EditDecisions(recommendedDuration: 2, recommendedHook: "open", hookId: order.first ?? 0, coldOpen: Array(order.prefix(1)),
+                          finalEditOrder: order, trims: [], voiceovers: [], brollPlacements: broll,
+                          editNotes: [], styleMatchNotes: "", videoSummary: "")
+        }
+
         let index = ContentIndex(durationSeconds: 2, videoSummary: "x", shots: [shot(0, .talkingHead), shot(1, .foodCloseup)], talkSpans: [])
-        let decisions = EditDecisions(recommendedDuration: 2, recommendedHook: "open", hookId: 0, coldOpen: [0],
-                                      finalEditOrder: [0], trims: [], voiceovers: [],
-                                      brollPlacements: [.init(overShotId: 0, brollShotId: 1, startOffsetSeconds: 0.2, durationSeconds: 0.5, reason: "show food")],
-                                      editNotes: [], styleMatchNotes: "", videoSummary: "")
-        let (plan, warnings) = adapt(index: index, decisions: decisions)
+        let (plan, warnings) = adapt(index: index, decisions: decisions([0],
+            broll: [.init(overShotId: 0, brollShotId: 1, startOffsetSeconds: 0.2, durationSeconds: 0.5, reason: "show food")]))
         let keptCount = plan.segments.filter { $0.keep }.count
-        let ok = plan.segments.count == 2 && keptCount == 2 && plan.brollPlacements.count == 1
+        let cleanOK = plan.segments.count == 2 && keptCount == 2 && plan.brollPlacements.count == 1
             && plan.finalEditOrder == [0] && warnings.isEmpty
-        Log.app(ok ? "✅ EditPlanAdapter.selfCheck passed (2 segments, both kept, 1 broll, 0 warnings)"
-                   : "❌ EditPlanAdapter.selfCheck FAILED — segs \(plan.segments.count), kept \(keptCount), broll \(plan.brollPlacements.count), warnings \(warnings)")
+
+        // Reaction gate: shot 0 = 6s first_taste talking-head (peak clamp), shot 2 = bite (never-cover).
+        let gateIndex = ContentIndex(durationSeconds: 30, videoSummary: "x",
+            shots: [shot(0, .talkingHead, len: 6, reaction: .firstTaste), shot(1, .foodCloseup), shot(2, .talkingHead, len: 6, reaction: .bite)],
+            talkSpans: [])
+        let (gatePlan, gateWarnings) = adapt(index: gateIndex, decisions: decisions([0, 2], broll: [
+            .init(overShotId: 0, brollShotId: 1, startOffsetSeconds: 0.5, durationSeconds: 2.5, reason: "cover the tail"),
+            .init(overShotId: 2, brollShotId: 1, startOffsetSeconds: 3.5, durationSeconds: 2, reason: "should drop"),
+        ]))
+        let clamped = gatePlan.brollPlacements.first
+        let gateOK = gatePlan.brollPlacements.count == 1 && clamped?.startOffsetSeconds == 3.0
+            && gateWarnings.contains { $0.hasPrefix("clamped b-roll over shot 0") }
+            && gateWarnings.contains { $0.hasPrefix("dropped b-roll over shot 2") }
+
+        let ok = cleanOK && gateOK
+        Log.app(ok ? "✅ EditPlanAdapter.selfCheck passed (clean adapt + peak clamp + bite drop)"
+                   : "❌ EditPlanAdapter.selfCheck FAILED — clean \(cleanOK), gate \(gateOK) (broll \(gatePlan.brollPlacements), warnings \(gateWarnings))")
         return ok
     }
 }

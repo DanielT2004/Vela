@@ -2554,7 +2554,7 @@ struct PolishView: View {
     // MARK: - Source picker sheet (add / swap B-roll)
 
     private func sourceSheet(_ picker: SourcePicker) -> some View {
-        let pool = store?.brollClips ?? []
+        let pool = store?.brollPool ?? []   // dedicated b-roll + set-aside visual clips (supply, not trash)
         return VStack(spacing: 0) {
             Capsule().fill(Color(hex: 0xD8D0C2)).frame(width: 40, height: 4).padding(.vertical, 14)
             VStack(alignment: .leading, spacing: 3) {
@@ -2596,7 +2596,8 @@ struct PolishView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text((seg?.description.isEmpty == false ? seg!.description : (seg?.sceneType.label ?? "Clip")))
                         .font(VeFont.sans(13.5, weight: .semibold)).foregroundStyle(Color.veCharcoal).lineLimit(1)
-                    Text("\(Int((store?.sourceLength(id) ?? 0).rounded()))s clip")
+                    // Set-aside clips are supply too — say where this one came from (footage never lost).
+                    Text("\(Int((store?.sourceLength(id) ?? 0).rounded()))s clip\(store?.cutTray.contains(id) == true ? " · set aside" : "")")
                         .font(VeFont.sans(11.5)).foregroundStyle(Color.veWarmGray)
                 }
                 Spacer(minLength: 0)

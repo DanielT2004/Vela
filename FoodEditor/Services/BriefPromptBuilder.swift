@@ -41,8 +41,8 @@ enum BriefPromptBuilder {
             lines.append("- Cold open: open the video with these shots in THIS exact order, back-to-back, each using the strongest available segment of that type: \(ordered). This is a COLD OPEN — these play FIRST, before the intro, even if a shot naturally belongs to a later section; put them at the very top of final_edit_order and boost their hook_score, then continue with the intro and the rest in intro → middle → end order. If a requested type isn't in the footage, skip it and continue with the next.")
         }
 
-        // 3 — voiceover/b-roll lean → voiceover_candidate + broll_placements
-        lines.append("- Voiceover vs. on camera: \(b.brollLean.phrasing) The four strict voiceover_candidate conditions in the body below remain hard requirements regardless.")
+        // 3 — voiceover/b-roll lean → broll_placements coverage + voiceover leaning
+        lines.append(brollLine(for: b, template: template))
 
         // 3b — creator will narrate in post (Vela's in-app voiceover recorder) → cut for visual flow
         if b.plansVoiceover {
@@ -80,6 +80,30 @@ enum BriefPromptBuilder {
 
 
         """
+    }
+
+    /// The RESOLVED b-roll/voiceover line — relative leans resolve against the template's learned
+    /// heaviness so the prompt states NUMBERS, not vibes; absolute leans (the no-template flow) keep
+    /// their `phrasing`. An explicit override says outright that it overrides the style block's
+    /// coverage target, so the two lines can never silently contradict.
+    private static func brollLine(for b: EditBrief, template: StyleTemplate?) -> String {
+        let hard = "The strict voiceover conditions in the body below remain hard requirements regardless."
+        guard let heaviness = template?.profile.broll.heaviness else {
+            // No template (or a relative pick left over from one, defensively) → the absolute phrasing.
+            return "- Voiceover vs. on camera: \(b.brollLean.phrasing) \(hard)"
+        }
+        let usualPct = Int((min(1, max(0, heaviness)) * 100).rounded())
+        let askPct = (b.brollLean.resolvedTarget(styleHeaviness: heaviness)).map { Int(($0 * 100).rounded()) }
+        switch b.brollLean {
+        case .matchStyle:
+            return "- B-roll amount: match this creator's usual — hit the style profile's b-roll COVERAGE TARGET above (roughly \(usualPct)% of the talking-on-camera time) with broll_placements, using voiceover marks where they help you get there. \(hard)"
+        case .moreMe:
+            return "- B-roll amount — for THIS video the creator asked for LESS b-roll than their usual: aim for roughly \(askPct ?? usualPct)% of the talking-on-camera time covered by broll_placements (their usual is ~\(usualPct)%). This overrides the style profile's coverage target above. \(hard)"
+        case .moreFood:
+            return "- B-roll amount — for THIS video the creator asked for MORE b-roll than their usual: aim for roughly \(askPct ?? usualPct)% of the talking-on-camera time covered by broll_placements (their usual is ~\(usualPct)%). This overrides the style profile's coverage target above. \(hard)"
+        case .onCamera, .balanced, .brollHeavy:
+            return "- Voiceover vs. on camera: \(b.brollLean.phrasing) \(hard)"
+        }
     }
 
     /// The creator's confirmed SPOKEN hook line, if the active template has one — user-confirmed

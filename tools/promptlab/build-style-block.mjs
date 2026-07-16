@@ -206,14 +206,14 @@ KEY STYLE TARGETS (translate these tendencies into your per-segment decisions):$
 - Preferred hook: ${hook} — they open within ~${opens}s. → Choose a hook segment of this type if one exists; give it the top of final_edit_order. If no such segment exists, pick the closest high-impact opener available.${montageLine}
 - Pacing: they average ~${cut}s per clip (${cutStyle}), total length ~${total}s. → This is their VISUAL rhythm — created by cutting between shots and laying quick b-roll, NOT by cutting people off mid-sentence. Do NOT use trim_to_seconds to pull talking toward this average; let a talking segment run as long as the thought needs. You may use the total length as a SOFT guide for which segments to keep, but completeness of the message wins — never drop or shorten a segment that's needed to land the point.
 - Voiceover ratio: ${vo} (0 = always face on camera, 1 = always voice over b-roll). → The higher this number, the more aggressively you should mark qualifying talking-head segments as voiceover_candidate (still respecting the strict voiceover rules in the body below).
-- B-roll: ${brollAmount} amount, used ${brollUsage}; favored shots: ${favShots}. → Aim for roughly ${brollPct}% of the final video covered by b-roll overlays (the broll_placements list), and prefer these shot types when choosing each b-roll and for voiceover_reason.
+- B-roll: ${brollAmount} amount, used ${brollUsage}; favored shots: ${favShots}. → COVERAGE TARGET: cover roughly ${brollPct}% of the TALKING-ON-CAMERA time with b-roll overlays (the broll_placements list), and never leave a coverable talking stretch longer than ~8 seconds fully uncovered. This visual rhythm is part of this creator's style — under-covering it is a style miss. Prefer their favored shot types when choosing each b-roll source and for voiceover_reason.
 ${sectionMap}${signatureSection}
 - Text/graphics habit: ${tgAmount} (${tgStyle}). → Note in edit_note where their usual overlays (e.g. dish names) would go; you are not creating graphics, just flagging placement.
 - Closing: ${closing}. → Try to end final_edit_order on a segment that fits this closing style.
 - Signature moves: ${moves}. → If the footage contains a moment that lets you honor one of these, do so and mention it in the relevant edit_note.
 - Anything unusual: ${unusual}.${habitsSection}${notesSection}
 
-PRIORITY RULE: When the style and good general editing conflict, favor the creator's style — it's why they're using this tool. The ONE exception: never violate the voiceover rules or the segmentation rules in the body below; those are hard constraints, the style is a strong preference on top of them.
+PRIORITY RULE: When the style and good general editing conflict, favor the creator's style — it's why they're using this tool. The ONE exception: never violate the hard editor rules or the strict voiceover conditions in the body below; those are hard constraints, the style is a strong preference on top of them.
 
 === END STYLE BLOCK ===
 

@@ -420,7 +420,11 @@ struct BreakdownSheet: View {
             .shadow(color: Color.veCharcoal.opacity(0.05), radius: 6, y: 2)
 
             // Honest about a light b-roll result — it's footage-bound, not a miss, and hand-editable.
-            if read.brollIsLight {
+            // When the creator EXPLICITLY asked high and the footage couldn't deliver, say so in their
+            // terms — the override must never read as ignored.
+            if read.brollAskShortfall {
+                ReasonNote(text: "You asked for more b-roll than this footage offers — every usable shot is on the shelf in Polish. Want more next time? Shoot extra food close-ups and cutaways.")
+            } else if read.brollIsLight {
                 ReasonNote(text: "B-roll is light on this cut — that's down to how much food-cutaway footage there was to layer over the talking. Want more? Add food shots over any clip in Polish.")
             }
         }

@@ -88,7 +88,9 @@ struct EditBrief: Equatable {
         if total > 0 { b.lengthSeconds = min(180, max(10, total)) }
 
         if let opener = HookShot(profileType: p.hook.type) { b.hookSequence = [opener] }
-        b.brollLean = BrollLean(voiceoverRatio: p.voiceover.voiceoverRatio)
+        // The template ANSWERS the b-roll question — the brief row states the learned style and offers
+        // relative per-video overrides; ".matchStyle" resolves to the template's heaviness downstream.
+        b.brollLean = .matchStyle
         // Narration-led creators (their posted videos are mostly voice over b-roll) almost certainly
         // narrate in post — default the voiceover plan ON from the fields the style learning already
         // captures. Vocabulary matches the extraction prompt's primary_mode enum.
@@ -152,45 +154,60 @@ enum HookShot: String, CaseIterable, Equatable {
 }
 
 /// How much to replace the creator's face with food b-roll while their voice keeps playing. Steers
-/// `voiceover_candidate` leaning + the `broll_placements` coverage target.
+/// the `broll_placements` coverage target + voiceover leaning. TWO vocabularies ("the template answers
+/// the survey", STATE.md 2026-07-15): the ABSOLUTE cases are the no-template flow's question ("Mostly
+/// me / A mix / Mostly food"); the RELATIVE cases are the template flow's per-video override, resolved
+/// against the learned heaviness ("More me / My usual / More food" = usual ∓ 0.15, clamped). Relative
+/// picks are per-video only — never written back into the template.
 enum BrollLean: String, CaseIterable, Equatable {
     case onCamera, balanced, brollHeavy
+    case matchStyle, moreMe, moreFood
+
+    /// The no-template flow's absolute options (today's grid, unchanged).
+    static let absoluteCases: [BrollLean] = [.onCamera, .balanced, .brollHeavy]
+    /// The template flow's RELATIVE overrides, in display order.
+    static let relativeCases: [BrollLean] = [.moreMe, .matchStyle, .moreFood]
 
     // Display-only (the prompt reads `phrasing`) — plain words a first-timer parses off vibes.
     var label: String {
         switch self {
-        case .onCamera:  return "Mostly me"
-        case .balanced:  return "A mix"
-        case .brollHeavy:return "Mostly food"
+        case .onCamera:   return "Mostly me"
+        case .balanced:   return "A mix"
+        case .brollHeavy: return "Mostly food"
+        case .moreMe:     return "More me"
+        case .matchStyle: return "My usual"
+        case .moreFood:   return "More food"   // niche-coupled string — swap per niche at expansion
         }
     }
 
     var phrasing: String {
         switch self {
         case .onCamera:
-            return "Keep the creator's face on camera. Mark voiceover_candidate true only where the strict rules truly require it, and keep broll_placements sparse."
+            return "Keep the creator's face on camera: keep b-roll placements sparse, and mark a talking shot for voiceover only where the strict voiceover conditions clearly hold."
         case .balanced:
             return "Balance face-on-camera with food b-roll using your normal judgement."
         case .brollHeavy:
-            return "Wherever a talking segment qualifies under the strict voiceover rules, lean voiceover_candidate true and cover more of the talking with food b-roll."
+            return "Lean into food b-roll: wherever a talking shot qualifies under the strict voiceover conditions, mark it for voiceover and cover more of the talking with matching b-roll."
+        case .matchStyle, .moreMe, .moreFood:
+            // Relative leans never reach the prompt via this string — BriefPromptBuilder resolves them
+            // against the template with real numbers. Defensive fallback = the balanced line.
+            return "Balance face-on-camera with food b-roll using your normal judgement."
         }
     }
 
-    /// Numeric coverage target handed to the coordinator's b-roll seeding cap. `nil` for balanced → fall
-    /// back to the template/profile default.
-    var coverageTarget: Double? {
+    /// Numeric coverage target for the coordinator's b-roll seeding cap, resolved against the active
+    /// style's learned heaviness. `nil` = fall through to the template/profile default (the caller's
+    /// `??` chain) — which is exactly what "my usual" means.
+    func resolvedTarget(styleHeaviness: Double?) -> Double? {
+        func clamp(_ x: Double) -> Double { min(0.50, max(0.05, x)) }
+        let usual = styleHeaviness ?? 0.25
         switch self {
-        case .onCamera:  return 0.10
-        case .balanced:  return nil
-        case .brollHeavy:return 0.45
-        }
-    }
-
-    init(voiceoverRatio: Double) {
-        switch voiceoverRatio {
-        case ..<0.33: self = .onCamera
-        case 0.66...: self = .brollHeavy
-        default:      self = .balanced
+        case .onCamera:   return 0.10
+        case .balanced:   return nil
+        case .brollHeavy: return 0.45
+        case .matchStyle: return nil
+        case .moreMe:     return clamp(usual - 0.15)
+        case .moreFood:   return clamp(usual + 0.15)
         }
     }
 }

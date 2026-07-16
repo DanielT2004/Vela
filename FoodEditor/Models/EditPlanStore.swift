@@ -60,7 +60,7 @@ final class EditPlanStore {
     /// Target fraction (0…1) of the final timeline to auto-cover with seeded B-roll — from the chosen
     /// style template (default 25%). A safety cap on seeding; Gemini also gets this target via the style
     /// block, so the prompt and the cap agree.
-    private let brollCoverageTarget: Double
+    let brollCoverageTarget: Double   // read by RetentionRead for the override-aware shortfall note
 
     /// When true (the two-call PERCEIVE→DECIDE pipeline), DECIDE owns the spine: `final_edit_order` is used as
     /// the spine EXACTLY — no food-closeup extraction, and kept-but-unordered shots (b-roll sources) go to the
@@ -192,9 +192,23 @@ final class EditPlanStore {
     /// future style-learning loop keeps the signal across kill / re-open.
     var exportFeedback: Bool?
 
+    /// The Polish b-roll SOURCE POOL: the dedicated b-roll clips plus any set-aside (cut) VISUAL clips —
+    /// a dropped food shot is supply, not trash. Computed, never persisted: `cutTray` stays the single
+    /// live source of truth (every keep:false id, always — footage is never silently lost), so restoring
+    /// a cut clip to the spine removes it from this pool with no stale entry to reconcile.
+    var brollPool: [Int] {
+        let fromTray = cutTray.filter { id in
+            guard let s = segmentsById[id] else { return false }
+            return s.isBrollSource && !brollClips.contains(id)
+        }
+        guard !fromTray.isEmpty else { return brollClips }
+        let sorted = fromTray.sorted { (segmentsById[$0]?.startSeconds ?? 0) < (segmentsById[$1]?.startSeconds ?? 0) }
+        return brollClips + TopicGrouping.groupedOrder(sorted, segmentsById: segmentsById)
+    }
+
     /// True when the cut has NO b-roll to work with — both the source pool and the placed lane are empty
     /// (e.g. a single talking-head clip). Drives the Polish empty-B-roll-lane hint.
-    var hasNoBrollAvailable: Bool { brollClips.isEmpty && brollLane.isEmpty }
+    var hasNoBrollAvailable: Bool { brollPool.isEmpty && brollLane.isEmpty }
 
     // MARK: - Persistence (save / resume)
     //
@@ -949,7 +963,13 @@ final class EditPlanStore {
         var spineClipBySeg: [Int: Clip] = [:]
         for c in order where spineClipBySeg[c.sourceSegmentId] == nil { spineClipBySeg[c.sourceSegmentId] = c }
 
-        let coverageCap = brollCoverageTarget * total
+        // ONE coverage semantic everywhere (style target, this cap, plannedBrollPct): the denominator is
+        // the spine's TALKING-ON-CAMERA time, not the whole timeline — a food-heavy spine shouldn't
+        // inflate the overlay budget. At seed time every clip is speed 1, so timelineDuration is exact.
+        let talkingSecs = order.reduce(0.0) { acc, c in
+            (segmentsById[c.sourceSegmentId]?.sceneType == .talkingHead) ? acc + c.timelineDuration : acc
+        }
+        let coverageCap = brollCoverageTarget * talkingSecs
         var lane: [OverlayClip] = []
         var covered = 0.0
 
@@ -962,8 +982,12 @@ final class EditPlanStore {
             let segStart = baseStart(of: clip.id)
             let segEnd = segStart + clip.timelineDuration
 
-            // Begin at the requested offset, clamped to sit inside the over-clip's window.
-            let offset = max(0, min(p.startOffsetSeconds, max(0, clip.timelineDuration - 0.3)))
+            // Begin at the requested offset — floored by the shared reaction cover policy (belt-and-braces
+            // mirror of the adapter's gate: bite/verdict never seed; a first_taste / peak_reaction keeps
+            // its ~3s peak face-on — an offset pushed past the clip window just fails the dur guard below).
+            let overKind = segmentsById[p.overSegmentId]?.reactionKind ?? ReactionKind.none
+            guard let minOffset = overKind.minCoverOffset else { continue }      // never-cover reaction
+            let offset = max(minOffset, min(p.startOffsetSeconds, max(0, clip.timelineDuration - 0.3)))
             var start = segStart + offset
             var dur = min(p.durationSeconds, srcLen, segEnd - start, total - start)
 
@@ -976,6 +1000,11 @@ final class EditPlanStore {
 
             guard dur >= 0.3 else { continue }                                   // too short / pushed out
             guard covered + dur <= coverageCap else { continue }                 // template coverage cap
+            // Variety net (mirrors the prompt's once-each VARY rule): an AI-seeded source appears at
+            // most once — our overlays always replay a source from its start, so a repeat is identical
+            // frames, not an edit. Manual placements in Polish are not constrained (deliberate
+            // callbacks stay the creator's call).
+            guard !lane.contains(where: { $0.sourceSegmentId == p.brollSegmentId }) else { continue }
             lane.append(OverlayClip(sourceSegmentId: p.brollSegmentId, startOnBase: start, duration: dur,
                                     sourceStart: src.startSeconds))
             covered += dur

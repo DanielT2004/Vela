@@ -89,7 +89,7 @@ struct FirstCutView: View {
 
     private func makeRead(_ store: EditPlanStore) -> RetentionRead? {
         guard !store.order.isEmpty || !store.plan.segments.isEmpty else { return nil }
-        return RetentionRead(plan: store.plan, store: store)
+        return RetentionRead(plan: store.plan, store: store, brief: session.brief)
     }
 
     // MARK: - Content (one frame; scrolls only when it must, e.g. SE-class screens)

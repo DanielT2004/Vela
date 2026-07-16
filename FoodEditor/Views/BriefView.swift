@@ -23,6 +23,7 @@ struct BriefView: View {
     @State private var brief = EditBrief()
     @State private var didLoad = false
     @State private var swapOpen = false
+    @State private var leanExpanded = false   // the style lean card's per-video override reveal
 
     var body: some View {
         VStack(spacing: 0) {
@@ -33,7 +34,13 @@ struct BriefView: View {
                     footageSection.padding(.top, 22)
                     lengthSection.padding(.top, 24)
                     voiceoverPlanToggle.padding(.top, 10)
-                    section("While you're talking") { leanSection }
+                    // "The template answers the survey": with a style, the b-roll question arrives
+                    // PRE-ANSWERED (a statement row + relative per-video overrides); without one, it's
+                    // still a real question (the absolute grid).
+                    section("While you're talking") {
+                        if let broll = templates.active?.profile.broll { styleLeanCard(broll) }
+                        else { leanSection }
+                    }
                     section("Anything specific? (optional)") { noteField }
                 }
                 .padding(.horizontal, 22)
@@ -265,12 +272,75 @@ struct BriefView: View {
         case .onCamera:   return "Your face carries it — food shots only where they really punch."
         case .balanced:   return "You on camera for the big moments, food shots over the rest."
         case .brollHeavy: return "You keep talking — the screen shows the food while your voice runs under it."
+        case .matchStyle: return "Cut to your usual b-roll rhythm."
+        case .moreMe:     return "Less b-roll than your usual — your face carries more of this one."
+        case .moreFood:   return "More b-roll than your usual — food over more of your talking."
         }
     }
 
     private var leanGrid: some View {
-        grid(BrollLean.allCases.map(\.label), columns: 3,
-             selected: index(of: brief.brollLean, in: BrollLean.allCases)) { brief.brollLean = BrollLean.allCases[$0] }
+        grid(BrollLean.absoluteCases.map(\.label), columns: 3,
+             selected: index(of: brief.brollLean, in: BrollLean.absoluteCases)) { brief.brollLean = BrollLean.absoluteCases[$0] }
+    }
+
+    // MARK: style lean card (template path — the question arrives pre-answered)
+
+    /// A STATEMENT the creator can veto, not a question to re-answer: collapsed, it names the learned
+    /// b-roll style ("medium · food close-ups"); tapping reveals three RELATIVE overrides for this video
+    /// only (never written back to the template). Pre-answered ≠ locked — the veto is one visible tap.
+    private func styleLeanCard(_ broll: BrollInfo) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { leanExpanded.toggle() }
+            } label: {
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("B-roll — your style: \(brollDescriptor(broll))")
+                            .font(VeFont.sans(14, weight: .semibold)).foregroundStyle(Color.veCharcoal)
+                            .multilineTextAlignment(.leading)
+                        Text(leanSubline)
+                            .font(VeFont.sans(12)).foregroundStyle(Color.veWarmGray)
+                    }
+                    Spacer(minLength: 8)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.veFaintGray)
+                        .rotationEffect(.degrees(leanExpanded ? 180 : 0))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if leanExpanded {
+                VStack(alignment: .leading, spacing: 8) {
+                    grid(BrollLean.relativeCases.map(\.label), columns: 3,
+                         selected: index(of: brief.brollLean, in: BrollLean.relativeCases)) { brief.brollLean = BrollLean.relativeCases[$0] }
+                    Text(leanMessage)
+                        .font(VeFont.sans(12)).foregroundStyle(Color.veWarmGray)
+                        .lineSpacing(1.5)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .animation(.easeOut(duration: 0.15), value: brief.brollLean)
+                }
+                .padding(.top, 12)
+            }
+        }
+        .padding(14)
+        .background(Color.white, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .shadow(color: Color.veCharcoal.opacity(0.05), radius: 8, y: 2)
+    }
+
+    /// "medium · food close-ups, plating" — heaviness band + up to two favored shots. Bands split the
+    /// template editor's 0…0.5 heaviness slider into thirds around its 0.25 default.
+    private func brollDescriptor(_ b: BrollInfo) -> String {
+        let band = b.heaviness < 0.18 ? "light" : (b.heaviness <= 0.32 ? "medium" : "heavy")
+        let shots = b.favoredShots.isEmpty ? b.favoredShotsText : b.favoredShots.prefix(2).joined(separator: ", ")
+        return "\(band) · \(shots.lowercased())"
+    }
+
+    private var leanSubline: String {
+        switch brief.brollLean {
+        case .moreMe:   return "This video: less b-roll than your usual"
+        case .moreFood: return "This video: more b-roll than your usual"
+        default:        return "Tap to change for this video"
+        }
     }
 
     /// Narration recorded IN Vela after the cut (Polish → Voiceover tool) — pre-set from the template's
@@ -316,9 +386,12 @@ struct BriefView: View {
     private var confirmationSummary: String {
         var parts = ["Editing a \(brief.lengthDisplay) video"]
         switch brief.brollLean {
-        case .onCamera:  parts.append("staying on camera")
-        case .balanced:  break
-        case .brollHeavy:parts.append("leaning on food shots")
+        case .onCamera:   parts.append("staying on camera")
+        case .balanced:   break
+        case .brollHeavy: parts.append("leaning on food shots")
+        case .matchStyle: break   // matching their usual IS the default — nothing to call out
+        case .moreMe:     parts.append("staying on camera more than usual")
+        case .moreFood:   parts.append("leaning on food shots more than usual")
         }
         if brief.plansVoiceover { parts.append("recording a voiceover") }
         return parts.joined(separator: ", ") + " — sound right?"
@@ -357,6 +430,7 @@ struct BriefView: View {
         withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
             brief = seeded
             swapOpen = false
+            leanExpanded = false   // the override was relative to the OLD template — collapse to "my usual"
         }
         UIImpactFeedbackGenerator(style: .soft).impactOccurred()
     }
